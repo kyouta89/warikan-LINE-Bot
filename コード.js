@@ -75,10 +75,22 @@ function doPost(e) {
       } else if (receivedText === "取消" || receivedText === "取り消し") {
         const senderId = event.source.userId; // コマンドを送った本人のID
         replyText = cancelLastRecord(senderId); // 新しい取消関数を呼び出す
+
+      // ★★★ 【NEW!!】限定割り勘コマンド (＃) ★★★
+      // （「@」より先に判定するのがミソ）
       } else if (
-        receivedText.startsWith("@") ||
-        receivedText.startsWith("＠")
+        receivedText.startsWith("#") || // 半角
+        receivedText.startsWith("＃")  // 全角
       ) {
+        // ここに「限定割り勘」の記録ロジックを書く！
+        replyText = registerLimitedPayment(receivedText, sourceId, event.source.userId, config);
+
+        // ★★★ ここからが新しい「メンション無視」の処理 ★★★
+      } else if (event.message.mention && event.message.mention.mentionees.length > 0) {
+        // メンション情報が含まれていたら、コマンドとして扱わずに無視する
+        shouldReply = false; 
+
+      } else if (receivedText.startsWith('@') || receivedText.startsWith('＠')) { // ←ここは元のコード
         const parts = receivedText.split("\n");
         parts[0] = parts[0].substring(1).trim();
         if (parts.length === 2 || parts.length === 3) {
@@ -100,6 +112,7 @@ function doPost(e) {
               amount,
               content,
               status,
+              "",
             ]);
             replyText = `【記録しました！】\n支払った人： ${payer}\n金額： ${amount}円`;
             if (content) {
@@ -164,29 +177,26 @@ function doPost(e) {
 }
 
 // ---------------------------------------------------------------------------------
-// ★★★ ここから下が「参加者リスト対応」の新しい「精算計算」関数 ★★★
+// ★★★ ここから下が【Ver2】「限定割り勘」対応の「精算計算」関数 ★★★
 // ---------------------------------------------------------------------------------
 function calculateSettlement(sourceId, receivedText) {
   // ----------------
-  // 0. 参加者リストの解析
+  // 0. 参加者リストの解析 (ここはVer1と同じ)
   // ----------------
   const lines = receivedText.split("\n");
   if (lines.length < 2) {
     return "「精算」コマンドの使い方が違うみたい！\n\n精算\n（参加者A）\n（参加者B）\n（参加者C）\n\nのように、改行して「参加者全員」の名前を送ってね。";
   }
 
-  // 1行目（"精算"）を削除し、空白行を除外し、重複をなくす
   const participants = new Set();
   for (let i = 1; i < lines.length; i++) {
-    const name = lines[i].trim(); // 前後の空白を削除
+    const name = lines[i].trim();
     if (name) {
-      // 空白行は無視
       participants.add(name);
     }
   }
-
-  const participantList = Array.from(participants); // 最終的な参加者リスト（重複なし）
-  const numParticipants = participantList.length; // 最終的な参加人数
+  const participantList = Array.from(participants); // 最終的な精算参加者リスト
+  const numParticipants = participantList.length;
 
   if (numParticipants === 0) {
     return "参加者が誰も指定されてないみたい...。\n\n精算\n（参加者A）\n（参加者B）\n\nのように送ってね！";
@@ -200,9 +210,26 @@ function calculateSettlement(sourceId, receivedText) {
   const sheet = spreadSheet.getSheetByName(config.SHEET_NAME);
   const allData = sheet.getDataRange().getValues();
 
-  let totalAmount = 0; // 支払総額
-  const payments = {}; // 誰がいくら払ったか（記録があった人だけ）
-  const targetRows = []; // 精算対象の「行番号」を保存
+  let totalAmount = 0; // 支払総額（サマリー表示用）
+  const targetRows = []; // 精算対象の「行番号」
+
+  // ★★★【NEW!!】「@」コマンドだけが使われたかのフラグ ★★★
+  let onlyAtCommandsUsed = true;
+
+  // ★★★【変更点 1】★★★
+  // 「支払額」と「負担額」を別々に集計するオブジェクトを用意
+  const payments = {}; // 誰がいくら【支払ったか】
+  const burdens = {};  // 誰がいくら【負担すべきか】
+
+  // 精算参加者リスト（participantList）全員分を0で初期化
+  participantList.forEach((name) => {
+    payments[name] = 0;
+    burdens[name] = 0;
+  });
+
+  // ----------------
+  // 2. 割り勘計算（★1行ずつ処理）
+  // ----------------
 
   // 1行目（ヘッダー）を飛ばして2行目からチェック
   for (let i = 1; i < allData.length; i++) {
@@ -211,60 +238,100 @@ function calculateSettlement(sourceId, receivedText) {
     const payer = row[3]; // D列: 支払った人
     const amount = row[4]; // E列: 金額
     const status = row[6]; // G列: ステータス
+    // ★★★【変更点 2】★★★
+    const limitedMembersString = row[7]; // H列: 限定対象者リスト（カンマ区切り）
 
     // 「グループIDが一致」かつ「ステータスが "記録済"」の行だけ
     if (rowSourceId === sourceId && status === "記録済") {
       if (typeof amount === "number" && !isNaN(amount)) {
+        
+        // (A) 支払総額（サマリー用）に加算
         totalAmount += amount;
-
-        // 支払者ごとの合計を計算
+        
+        // (B) 「支払者」を集計（Ver1と同じ）
+        // ※精算メンバー外の人が支払った場合も考慮するため、初期化(L196)とは別に集計
         if (payments[payer]) {
           payments[payer] += amount;
         } else {
           payments[payer] = amount;
         }
 
-        targetRows.push(i + 1);
+        // (C) 精算対象の行番号を保存
+        targetRows.push(i + 1); //
+
+        // ★★★【変更点 3】★★★
+        // (D) 「負担額」を割り振る
+        
+        let targetSplitList = []; // 今回の割り勘対象者
+
+        if (limitedMembersString) {
+          // (D-1) H列に指定がある場合 (＃コマンド)
+
+          // ★★★【NEW!!】「＃」が1件でもあればフラグをfalseに ★★★
+          onlyAtCommandsUsed = false;
+          
+          targetSplitList = limitedMembersString.split(',').map(name => name.trim());
+        } else {
+          // (D-2) H列が空欄の場合 (＠コマンド)
+          targetSplitList = participantList; // 精算メンバー全員が対象
+        }
+
+        // 「精算メンバー(participantList)」かつ「今回の支払対象者(targetSplitList)」
+        // ＝『今回、負担すべき人たち』
+        const validBurdenMembers = participantList.filter(name =>
+          targetSplitList.includes(name)
+        );
+
+        // 負担すべき人が1人以上いる場合のみ、負担額を計算
+        if (validBurdenMembers.length > 0) {
+          const numValidBurdens = validBurdenMembers.length;
+          
+          // 1円の誤差も出ないように割り勘額を計算 (Ver1のL225-L238 のロジック)
+          const averageCost_floor = Math.floor(amount / numValidBurdens);
+          let remainder = amount % numValidBurdens;
+
+          // 『今回、負担すべき人たち』の burdens に金額を加算
+          validBurdenMembers.forEach(name => {
+            let cost = averageCost_floor;
+            if (remainder > 0) {
+              cost += 1;
+              remainder--;
+            }
+            burdens[name] += cost; // ★個人の負担総額に加算！
+          });
+        }
+        // (もし validBurdenMembers が0人 = 精算メンバー外での割り勘なら、
+        //  精算メンバーの負担額(burdens)は誰も増えない。これでOK)
       }
     }
   }
 
-  // 精算対象のデータがあるかチェック
+  // 精算対象のデータがあるかチェック (Ver1と同じ)
   if (targetRows.length === 0) {
-    return "精算する記録が何もないみたいだよ。";
+    return "精算する記録が何もないみたいだよ。"; //
   }
 
   // ----------------
-  // 2. 割り勘計算（★「宣言された人数」で割る）
+  // 3. 貸し借り（精算）の計算
   // ----------------
-
-  // 参加者ごとの割り勘額を計算（1円の誤差も出ないように）
-  const averageCost_floor = Math.floor(totalAmount / numParticipants);
-  let remainder = totalAmount % numParticipants;
-
-  const averageCosts = {}; // 参加者ごとの最終的な割り勘額
-
-  participantList.forEach((name) => {
-    let cost = averageCost_floor;
-    if (remainder > 0) {
-      cost += 1; // 余りを1円ずつ配分
-      remainder--;
-    }
-    averageCosts[name] = cost;
-  });
-
-  const displayAverage = (totalAmount / numParticipants).toFixed(0);
+  
+  // ★★★【変更点 4】★★★
+  // Ver1の「総額÷人数」の計算 (L224-L238) は丸ごと削除！
+  // 代わりに、集計した「支払額」と「負担額」で差額を計算
 
   const balances = {}; // 貸し借り
-
-  // ★「宣言された参加者リスト」を基準に貸し借りを計算
+  
+  // 「精算メンバー」全員の貸し借りを計算
   participantList.forEach((name) => {
-    const paid = payments[name] || 0; // ★支払い記録がなければ 0円
-    balances[name] = paid - averageCosts[name]; // (支払った額 - 割り勘額)
+    const paid = payments[name] || 0; // その人が支払った総額
+    const burden = burdens[name] || 0; // その人が負担すべき総額
+    
+    balances[name] = paid - burden; // (支払った額 - 負担総額)
   });
 
+
   // ----------------
-  // 3. 貸し借り（精算）の計算（ここは前回と同じロジック）
+  // 貸し借り（精算）の計算ロジック (ここはVer1と全く同じ)
   // ----------------
   const creditors = []; // プラスの人
   const debtors = []; // マイナスの人
@@ -310,14 +377,25 @@ function calculateSettlement(sourceId, receivedText) {
   // ----------------
   // 4. 返信メッセージを作成
   // ----------------
+  
+  // ★★★【変更点 5】★★★
+  // 「1人あたり」は人によって違うので、サマリーから削除
+  
   let replyMessage = `【精算結果】\n\n`;
-  replyMessage += `◆ 支払総額： ${totalAmount} 円\n`;
-  replyMessage += `◆ 参加人数： ${numParticipants} 人\n`;
-  replyMessage += `（${participantList.join(", ")}）\n`; // ★宣言されたリストを表示
-  replyMessage += `◆ 1人あたり： 約 ${displayAverage} 円\n`;
-  if (totalAmount % numParticipants !== 0) {
-    replyMessage += `（1円単位の端数調整あり）\n`;
+  replyMessage += `◆ 支払総額 (記録済)： ${totalAmount} 円\n`;
+  replyMessage += `◆ 精算メンバー ( ${numParticipants} 人 )：\n`;
+  replyMessage += `（${participantList.join(", ")}）\n`;
+  
+  // ★★★【NEW!!】「@」コマンドだけだったら「1人あたり」を表示 ★★★
+  if (onlyAtCommandsUsed) {
+    const displayAverage = (totalAmount / numParticipants).toFixed(0);
+    replyMessage += `◆ 1人あたり： 約 ${displayAverage} 円\n`;
+    if (totalAmount % numParticipants !== 0) {
+      replyMessage += `（1円単位の端数調整あり）\n`;
+    }
   }
+
+  // 元のL325 の改行は、ここに入れる
   replyMessage += `\n`;
 
   if (transactions.length > 0) {
@@ -328,7 +406,7 @@ function calculateSettlement(sourceId, receivedText) {
   }
 
   // ----------------
-  // 5. ステータスを「精算済」に更新
+  // 5. ステータスを「精算済」に更新 (Ver1と同じ)
   // ----------------
   targetRows.forEach((rowNumber) => {
     sheet.getRange(rowNumber, 7).setValue("精算済");
@@ -558,4 +636,64 @@ function getHelpMessage() {
   message += `リセット`;
 
   return message;
+}
+
+// ＃コマンドで限定割り勘を登録する関数
+function registerLimitedPayment(receivedText, sourceId, senderId, config) {
+  const parts = receivedText.split("\n");
+  parts[0] = parts[0].substring(1).trim(); // 「#」を取り除く
+
+  // ★「限定」は最低4行（支払者、金額、内容、対象者1）が必要
+  if (parts.length < 4) {
+    return "ごめん、限定割り勘のフォーマットが違うみたい。\n\n＃（支払った人）\n（金額）\n（内容）\n（対象者A）\n（対象者B）...\n\nのように、対象者を「4行目以降」に指定してね！";
+  }
+
+  const payer = parts[0];
+  const amountString = parts[1].trim();
+  let hankakuAmountString = zenkakuToHankaku(amountString); //
+  hankakuAmountString = hankakuAmountString.replace(/[^0-9]/g, "");
+
+  // ★対象者リスト（4行目以降）を取得
+  const targetMembers = [];
+  for (let i = 3; i < parts.length; i++) {
+    const name = parts[i].trim();
+    if (name) { // 空白行は無視
+      targetMembers.push(name);
+    }
+  }
+
+  // 必須項目（支払者、金額、対象者1人以上）のチェック
+  if (payer && hankakuAmountString && !isNaN(hankakuAmountString) && targetMembers.length > 0) {
+    const spreadSheet = SpreadsheetApp.openById(config.SPREADSHEET_ID);
+    const sheet = spreadSheet.getSheetByName(config.SHEET_NAME);
+    const amount = Number(hankakuAmountString);
+    const content = parts[2].trim() || "（内容なし）"; // 3行目が空でもOK
+    const status = "記録済";
+    
+    // ★H列（8列目）に「カンマ区切り」の文字列で保存
+    const limitedMembersString = targetMembers.join(","); 
+
+    sheet.appendRow([
+      new Date(),
+      sourceId,
+      senderId,
+      payer,
+      amount,
+      content,
+      status,
+      limitedMembersString // ★H列に保存！
+    ]);
+
+    let replyText = `【限定記録しました！】\n支払った人： ${payer}\n金額： ${amount}円`;
+    if (content !== "（内容なし）") {
+      replyText += `\n内容： ${content}`;
+    }
+    replyText += `\n\n★対象者 ( ${targetMembers.length}名 )\n${targetMembers.join(", ")}`;
+    
+    return replyText;
+
+  } else {
+    // 項目が足りない場合
+    return "ごめん、フォーマットが違うか、対象者が指定されてないみたい。\n\n＃（支払った人）\n（金額）\n（内容）\n（対象者A）\n...\n\n金額は「数字」、対象者は「1人以上」指定してね！";
+  }
 }
