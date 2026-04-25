@@ -301,6 +301,45 @@ function __test_handleEvent_dispatch() {
     __assert(r.shouldReply === false, "ignored");
   });
 
+  check("normalizeName: 全角英数→半角、カナ→ひら、空白trim", function () {
+    __assertEq(normalizeName("タロウ"), "たろう", "kata→hira");
+    __assertEq(normalizeName("Ｔａｒｏ"), "Taro", "fullwidth→halfwidth");
+    __assertEq(normalizeName("　たろう　"), "たろう", "trim and zenkaku space");
+    __assertEq(normalizeName("たろう"), "たろう", "passthrough");
+  });
+
+  check("findSimilarPayer: カタ違いを検知", function () {
+    // seed には Alice, Bob があるので、それと衝突しない名前で検証
+    // まず履歴に "たろう" を入れる
+    handleEvent(__mkEvent("@たろう\n100"), config);
+    // "タロウ" を新規追加すると "たろう" が類似として返る想定
+    __assertEq(findSimilarPayer("タロウ", TEST_SOURCE_ID), "たろう", "kata variant detected");
+    // 完全一致はnull
+    __assertEq(findSimilarPayer("たろう", TEST_SOURCE_ID), null, "exact match → no warning");
+    // 別人はnull
+    __assertEq(findSimilarPayer("はなこ", TEST_SOURCE_ID), null, "different name → no warning");
+    // 短い別名（旅行で簡略化）も誤検知しない
+    __assertEq(findSimilarPayer("たろき", TEST_SOURCE_ID), null, "1-char-different name not flagged");
+    __test_cleanup();
+    __test_seed_at_records();
+  });
+
+  check("@ 記録時に類似名があれば警告を返信に追記", function () {
+    handleEvent(__mkEvent("@たろう\n100"), config);  // 既存
+    r = handleEvent(__mkEvent("@タロウ\n200"), config);  // タイポっぽい新規
+    __assert(r.replyText.indexOf("【記録しました！】") === 0, "still records");
+    __assert(r.replyText.indexOf("もしかして「たろう」") >= 0, "warning appended");
+    __test_cleanup();
+    __test_seed_at_records();
+  });
+
+  check("@ 記録時に類似名がなければ警告なし", function () {
+    r = handleEvent(__mkEvent("@TestPayer123\n100"), config);
+    __assert(r.replyText.indexOf("もしかして") === -1, "no warning");
+    __test_cleanup();
+    __test_seed_at_records();
+  });
+
   check("join イベント → ウェルカム + メニュー", function () {
     const joinEvent = {
       type: "join",

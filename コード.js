@@ -254,6 +254,9 @@ function registerPayment(receivedText, sourceId, senderId, config) {
     : [];
   const limitedMembersString = targets.length > 0 ? targets.join(",") : "";
 
+  // 記録前にタイポチェック（記録後だと新規入力の名前と一致してしまう）
+  const similar = findSimilarPayer(payer, sourceId);
+
   const sheet = SpreadsheetApp.openById(config.SPREADSHEET_ID).getSheetByName(config.SHEET_NAME);
   sheet.appendRow([new Date(), sourceId, senderId, payer, amount, content, "記録済", limitedMembersString]);
 
@@ -261,6 +264,9 @@ function registerPayment(receivedText, sourceId, senderId, config) {
   if (content) replyText += `\n内容： ${content}`;
   if (targets.length > 0) {
     replyText += `\n\n★対象者 ( ${targets.length}名 )\n${targets.join(", ")}`;
+  }
+  if (similar) {
+    replyText += `\n\n⚠ もしかして「${similar}」のこと？\n違うなら気にしないでOK。\nタイポなら「取消」で消して入れ直してね。`;
   }
   return { shouldReply: true, replyText: replyText, quickReplyLabels: ["履歴", "取消"] };
 }
@@ -724,6 +730,33 @@ function showMembers(sourceId) {
 // ---------------------------------------------------------------------------------
 // ★★★ ここから下が新しく追加した「ヘルプ」専用の関数 ★★★
 // ---------------------------------------------------------------------------------
+// 名前を正規化（全角英数→半角、全角スペース→半角、カタカナ→ひらがな、trim）
+function normalizeName(s) {
+  if (!s) return "";
+  let r = s.replace(/[Ａ-Ｚａ-ｚ０-９]/g, function (c) {
+    return String.fromCharCode(c.charCodeAt(0) - 0xFEE0);
+  });
+  r = r.replace(/　/g, " ").trim();
+  r = r.replace(/[ァ-ヶ]/g, function (c) {
+    return String.fromCharCode(c.charCodeAt(0) - 0x60);
+  });
+  return r;
+}
+
+// 既存の払った人の中で、正規化したら一致するけど元の表記が違う名前があれば返す
+// 例: "タロウ" を新規入力したとき履歴に "たろう" があれば "たろう" を返す
+function findSimilarPayer(newName, sourceId) {
+  const normalized = normalizeName(newName);
+  if (!normalized) return null;
+  const payers = getKnownPayers(sourceId);
+  for (let i = 0; i < payers.length; i++) {
+    const existing = payers[i];
+    if (existing === newName) return null; // 完全一致は警告不要
+    if (normalizeName(existing) === normalized) return existing;
+  }
+  return null;
+}
+
 // 未精算の履歴に出てくる「払った人」のユニーク一覧を返す
 function getKnownPayers(sourceId) {
   const config = getConfig();
