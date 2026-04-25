@@ -153,10 +153,6 @@ function handleEvent(event, config) {
     };
   }
 
-  if (receivedText === "リセット") {
-    return { shouldReply: true, replyText: resetAllRecords(sourceId), quickReplyLabels: [] };
-  }
-
   if (receivedText === "メンバー") {
     return { shouldReply: true, replyText: showMembers(sourceId), quickReplyLabels: ["履歴", "ヘルプ"] };
   }
@@ -585,52 +581,6 @@ function cancelLastRecord(senderId) {
   return "取消できる、あなた自身の「未精算の記録」が見つかりませんでした。";
 }
 
-// ---------------------------------------------------------------------------------
-// ★★★ ここから下が新しく追加した「全記録リセット」専用の関数 ★★★
-// ---------------------------------------------------------------------------------
-function resetAllRecords(sourceId) {
-  const config = getConfig();
-  const spreadSheet = SpreadsheetApp.openById(config.SPREADSHEET_ID);
-  const sheet = spreadSheet.getSheetByName(config.SHEET_NAME);
-
-  // シートの全データを取得
-  const allData = sheet.getDataRange().getValues();
-
-  const targetRows = []; // リセット対象の「行番号」
-
-  // 1行目（ヘッダー）を飛ばして2行目からチェック（上から全部スキャン）
-  for (let i = 1; i < allData.length; i++) {
-    const row = allData[i];
-    const rowSourceId = row[1]; // B列: グループID
-    const status = row[6]; // G列: ステータス
-
-    // 「グループIDが一致」かつ「ステータスが "記録済"」の行を対象にする
-    if (rowSourceId === sourceId && status === "記録済") {
-      targetRows.push(i + 1); // (iは0始まり、行番号は1始まりなので +1)
-    }
-  }
-
-  // ----------------
-  // リセット対象があるかチェック
-  // ----------------
-  if (targetRows.length === 0) {
-    return "リセットする「記録済」のデータはありませんでした。";
-  }
-
-  // ----------------
-  // ステータスを「リセット済」に更新
-  // ----------------
-  targetRows.forEach((rowNumber) => {
-    // G列（7列目）のステータスを書き換える
-    sheet.getRange(rowNumber, 7).setValue("リセット済");
-  });
-
-  return `【リセット完了】\n${targetRows.length}件の未精算データをすべてリセットしました。`;
-}
-
-// ---------------------------------------------------------------------------------
-// ★★★ ここから下が新しく追加した「履歴表示」専用の関数 ★★★
-// ---------------------------------------------------------------------------------
 function showHistory(sourceId) {
   const config = getConfig();
   const spreadSheet = SpreadsheetApp.openById(config.SPREADSHEET_ID);
