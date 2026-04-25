@@ -31,11 +31,17 @@ function buildQuickReply(labels) {
   };
 }
 
-// LINE 返信（quickReply 任意）
-function sendReply(replyToken, text, quickReplyLabels) {
+// LINE 返信（quickReply 任意、flex メッセージにも対応）
+// result.flexMessage があればそれを送る、なければ text を送る
+function sendReply(replyToken, result) {
   const config = getConfig();
-  const message = { type: "text", text: text };
-  const qr = buildQuickReply(quickReplyLabels);
+  let message;
+  if (result.flexMessage) {
+    message = result.flexMessage;
+  } else {
+    message = { type: "text", text: result.replyText };
+  }
+  const qr = buildQuickReply(result.quickReplyLabels);
   if (qr) message.quickReply = qr;
   UrlFetchApp.fetch(REPLY_URL, {
     headers: {
@@ -68,9 +74,16 @@ function handleEvent(event, config) {
 
   if (receivedText.startsWith("精算") || receivedText.startsWith("清算")) {
     if (receivedText.includes("\n")) {
-      const text = calculateSettlement(sourceId, receivedText);
-      const labels = text.indexOf("【精算結果】") === 0 ? ["履歴"] : ["ヘルプ"];
-      return { shouldReply: true, replyText: text, quickReplyLabels: labels };
+      const r = computeSettlement(sourceId, receivedText);
+      if (r.ok) {
+        return {
+          shouldReply: true,
+          replyText: formatSettlementText(r.data),
+          flexMessage: buildSettlementFlex(r.data),
+          quickReplyLabels: ["履歴"],
+        };
+      }
+      return { shouldReply: true, replyText: r.error, quickReplyLabels: ["ヘルプ"] };
     }
     return {
       shouldReply: true,
@@ -215,7 +228,7 @@ function doPost(e) {
   }
 
   if (replyToken && result.shouldReply) {
-    sendReply(replyToken, result.replyText, result.quickReplyLabels);
+    sendReply(replyToken, result);
   }
 
   return ContentService.createTextOutput(
@@ -224,242 +237,236 @@ function doPost(e) {
 }
 
 // ---------------------------------------------------------------------------------
-// ★★★ ここから下が【Ver2】「限定割り勘」対応の「精算計算」関数 ★★★
+// 精算（割り勘）計算
+// computeSettlement: シート読み込み + 計算 + ステータス更新（副作用あり）→ 構造化データを返す
+// formatSettlementText: 構造化データ → 文字列（altText / フォールバック用）
+// buildSettlementFlex: 構造化データ → Flex Message
+// calculateSettlement: 後方互換（テキスト）
 // ---------------------------------------------------------------------------------
-function calculateSettlement(sourceId, receivedText) {
-  // ----------------
-  // 0. 参加者リストの解析 (ここはVer1と同じ)
-  // ----------------
+
+function computeSettlement(sourceId, receivedText) {
   const lines = receivedText.split("\n");
   if (lines.length < 2) {
-    return "「精算」コマンドの使い方が違うみたい！\n\n精算\n（参加者A）\n（参加者B）\n（参加者C）\n\nのように、改行して「参加者全員」の名前を送ってね。";
+    return { ok: false, error: "「精算」コマンドの使い方が違うみたい！\n\n精算\n（参加者A）\n（参加者B）\n（参加者C）\n\nのように、改行して「参加者全員」の名前を送ってね。" };
   }
 
-  const participants = new Set();
+  const participantSet = new Set();
   for (let i = 1; i < lines.length; i++) {
     const name = lines[i].trim();
-    if (name) {
-      participants.add(name);
-    }
+    if (name) participantSet.add(name);
   }
-  const participantList = Array.from(participants); // 最終的な精算参加者リスト
-  const numParticipants = participantList.length;
-
-  if (numParticipants === 0) {
-    return "参加者が誰も指定されてないみたい...。\n\n精算\n（参加者A）\n（参加者B）\n\nのように送ってね！";
+  const participantList = Array.from(participantSet);
+  if (participantList.length === 0) {
+    return { ok: false, error: "参加者が誰も指定されてないみたい...。\n\n精算\n（参加者A）\n（参加者B）\n\nのように送ってね！" };
   }
 
-  // ----------------
-  // 1. スプレッドシートから支払いデータを取得
-  // ----------------
   const config = getConfig();
-  const spreadSheet = SpreadsheetApp.openById(config.SPREADSHEET_ID);
-  const sheet = spreadSheet.getSheetByName(config.SHEET_NAME);
+  const sheet = SpreadsheetApp.openById(config.SPREADSHEET_ID).getSheetByName(config.SHEET_NAME);
   const allData = sheet.getDataRange().getValues();
 
-  let totalAmount = 0; // 支払総額（サマリー表示用）
-  const targetRows = []; // 精算対象の「行番号」
-
-  // ★★★【NEW!!】「@」コマンドだけが使われたかのフラグ ★★★
+  let totalAmount = 0;
+  const targetRows = [];
   let onlyAtCommandsUsed = true;
+  const payments = {};
+  const burdens = {};
+  participantList.forEach((name) => { payments[name] = 0; burdens[name] = 0; });
 
-  // ★★★【変更点 1】★★★
-  // 「支払額」と「負担額」を別々に集計するオブジェクトを用意
-  const payments = {}; // 誰がいくら【支払ったか】
-  const burdens = {};  // 誰がいくら【負担すべきか】
-
-  // 精算参加者リスト（participantList）全員分を0で初期化
-  participantList.forEach((name) => {
-    payments[name] = 0;
-    burdens[name] = 0;
-  });
-
-  // ----------------
-  // 2. 割り勘計算（★1行ずつ処理）
-  // ----------------
-
-  // 1行目（ヘッダー）を飛ばして2行目からチェック
   for (let i = 1; i < allData.length; i++) {
     const row = allData[i];
-    const rowSourceId = row[1]; // B列: グループID
-    const payer = row[3]; // D列: 支払った人
-    const amount = row[4]; // E列: 金額
-    const status = row[6]; // G列: ステータス
-    // ★★★【変更点 2】★★★
-    const limitedMembersString = row[7]; // H列: 限定対象者リスト（カンマ区切り）
+    const rowSourceId = row[1];
+    const payer = row[3];
+    const amount = row[4];
+    const status = row[6];
+    const limitedMembersString = row[7];
 
-    // 「グループIDが一致」かつ「ステータスが "記録済"」の行だけ
-    if (rowSourceId === sourceId && status === "記録済") {
-      if (typeof amount === "number" && !isNaN(amount)) {
-        
-        // (A) 支払総額（サマリー用）に加算
-        totalAmount += amount;
-        
-        // (B) 「支払者」を集計（Ver1と同じ）
-        // ※精算メンバー外の人が支払った場合も考慮するため、初期化(L196)とは別に集計
-        if (payments[payer]) {
-          payments[payer] += amount;
-        } else {
-          payments[payer] = amount;
-        }
+    if (rowSourceId !== sourceId || status !== "記録済") continue;
+    if (typeof amount !== "number" || isNaN(amount)) continue;
 
-        // (C) 精算対象の行番号を保存
-        targetRows.push(i + 1); //
+    totalAmount += amount;
+    payments[payer] = (payments[payer] || 0) + amount;
+    targetRows.push(i + 1);
 
-        // ★★★【変更点 3】★★★
-        // (D) 「負担額」を割り振る
-        
-        let targetSplitList = []; // 今回の割り勘対象者
+    let targetSplitList;
+    if (limitedMembersString) {
+      onlyAtCommandsUsed = false;
+      targetSplitList = limitedMembersString.split(",").map((n) => n.trim());
+    } else {
+      targetSplitList = participantList;
+    }
 
-        if (limitedMembersString) {
-          // (D-1) H列に指定がある場合 (＃コマンド)
-
-          // ★★★【NEW!!】「＃」が1件でもあればフラグをfalseに ★★★
-          onlyAtCommandsUsed = false;
-          
-          targetSplitList = limitedMembersString.split(',').map(name => name.trim());
-        } else {
-          // (D-2) H列が空欄の場合 (＠コマンド)
-          targetSplitList = participantList; // 精算メンバー全員が対象
-        }
-
-        // 「精算メンバー(participantList)」かつ「今回の支払対象者(targetSplitList)」
-        // ＝『今回、負担すべき人たち』
-        const validBurdenMembers = participantList.filter(name =>
-          targetSplitList.includes(name)
-        );
-
-        // 負担すべき人が1人以上いる場合のみ、負担額を計算
-        if (validBurdenMembers.length > 0) {
-          const numValidBurdens = validBurdenMembers.length;
-          
-          // 1円の誤差も出ないように割り勘額を計算 (Ver1のL225-L238 のロジック)
-          const averageCost_floor = Math.floor(amount / numValidBurdens);
-          let remainder = amount % numValidBurdens;
-
-          // 『今回、負担すべき人たち』の burdens に金額を加算
-          validBurdenMembers.forEach(name => {
-            let cost = averageCost_floor;
-            if (remainder > 0) {
-              cost += 1;
-              remainder--;
-            }
-            burdens[name] += cost; // ★個人の負担総額に加算！
-          });
-        }
-        // (もし validBurdenMembers が0人 = 精算メンバー外での割り勘なら、
-        //  精算メンバーの負担額(burdens)は誰も増えない。これでOK)
-      }
+    const validBurdenMembers = participantList.filter((name) => targetSplitList.includes(name));
+    if (validBurdenMembers.length > 0) {
+      const num = validBurdenMembers.length;
+      const floorCost = Math.floor(amount / num);
+      let remainder = amount % num;
+      validBurdenMembers.forEach((name) => {
+        let cost = floorCost;
+        if (remainder > 0) { cost += 1; remainder--; }
+        burdens[name] += cost;
+      });
     }
   }
 
-  // 精算対象のデータがあるかチェック (Ver1と同じ)
   if (targetRows.length === 0) {
-    return "精算する記録が何もないみたいだよ。"; //
+    return { ok: false, error: "精算する記録が何もないみたいだよ。" };
   }
 
-  // ----------------
-  // 3. 貸し借り（精算）の計算
-  // ----------------
-  
-  // ★★★【変更点 4】★★★
-  // Ver1の「総額÷人数」の計算 (L224-L238) は丸ごと削除！
-  // 代わりに、集計した「支払額」と「負担額」で差額を計算
-
-  const balances = {}; // 貸し借り
-  
-  // 「精算メンバー」全員の貸し借りを計算
+  // 貸し借り精算（最小回数の支払い指示を greedy で算出）
+  const creditors = [];
+  const debtors = [];
   participantList.forEach((name) => {
-    const paid = payments[name] || 0; // その人が支払った総額
-    const burden = burdens[name] || 0; // その人が負担すべき総額
-    
-    balances[name] = paid - burden; // (支払った額 - 負担総額)
+    const balance = (payments[name] || 0) - (burdens[name] || 0);
+    if (balance > 0) creditors.push({ name: name, amount: balance });
+    else if (balance < 0) debtors.push({ name: name, amount: -balance });
   });
-
-
-  // ----------------
-  // 貸し借り（精算）の計算ロジック (ここはVer1と全く同じ)
-  // ----------------
-  const creditors = []; // プラスの人
-  const debtors = []; // マイナスの人
-
-  for (const name in balances) {
-    const balance = balances[name];
-    if (balance > 0) {
-      creditors.push({ name: name, amount: balance });
-    } else if (balance < 0) {
-      debtors.push({ name: name, amount: -balance });
-    }
-  }
 
   const transactions = [];
-  let creditorIndex = 0;
-  let debtorIndex = 0;
-
-  while (creditorIndex < creditors.length && debtorIndex < debtors.length) {
-    const creditor = creditors[creditorIndex];
-    const debtor = debtors[debtorIndex];
-    const transferAmount = Math.min(creditor.amount, debtor.amount);
-
-    if (transferAmount < 1) {
-      if (creditor.amount < debtor.amount) creditorIndex++;
-      else debtorIndex++;
+  let ci = 0, di = 0;
+  while (ci < creditors.length && di < debtors.length) {
+    const c = creditors[ci];
+    const d = debtors[di];
+    const transfer = Math.min(c.amount, d.amount);
+    if (transfer < 1) {
+      if (c.amount < d.amount) ci++; else di++;
       continue;
     }
-
-    const roundedAmount = Math.round(transferAmount);
-    if (roundedAmount > 0) {
-      transactions.push(
-        `${debtor.name} → ${creditor.name} に ${roundedAmount}円`
-      );
+    const rounded = Math.round(transfer);
+    if (rounded > 0) {
+      transactions.push({ from: d.name, to: c.name, amount: rounded });
     }
-
-    creditor.amount -= transferAmount;
-    debtor.amount -= transferAmount;
-
-    if (creditor.amount < 1) creditorIndex++;
-    if (debtor.amount < 1) debtorIndex++;
+    c.amount -= transfer;
+    d.amount -= transfer;
+    if (c.amount < 1) ci++;
+    if (d.amount < 1) di++;
   }
 
-  // ----------------
-  // 4. 返信メッセージを作成
-  // ----------------
-  
-  // ★★★【変更点 5】★★★
-  // 「1人あたり」は人によって違うので、サマリーから削除
-  
-  let replyMessage = `【精算結果】\n\n`;
-  replyMessage += `◆ 支払総額 (記録済)： ${totalAmount} 円\n`;
-  replyMessage += `◆ 精算メンバー ( ${numParticipants} 人 )：\n`;
-  replyMessage += `（${participantList.join(", ")}）\n`;
-  
-  // ★★★【NEW!!】「@」コマンドだけだったら「1人あたり」を表示 ★★★
-  if (onlyAtCommandsUsed) {
-    const displayAverage = (totalAmount / numParticipants).toFixed(0);
-    replyMessage += `◆ 1人あたり： 約 ${displayAverage} 円\n`;
-    if (totalAmount % numParticipants !== 0) {
-      replyMessage += `（1円単位の端数調整あり）\n`;
-    }
+  // ステータスを「精算済」に更新
+  targetRows.forEach((rowNumber) => sheet.getRange(rowNumber, 7).setValue("精算済"));
+
+  const numParticipants = participantList.length;
+  return {
+    ok: true,
+    data: {
+      totalAmount: totalAmount,
+      participants: participantList,
+      transactions: transactions,
+      isUniform: onlyAtCommandsUsed,
+      averagePerPerson: onlyAtCommandsUsed ? Number((totalAmount / numParticipants).toFixed(0)) : null,
+      hasFractionalRemainder: onlyAtCommandsUsed && (totalAmount % numParticipants !== 0),
+    },
+  };
+}
+
+function formatSettlementText(data) {
+  let m = `【精算結果】\n\n`;
+  m += `◆ 支払総額 (記録済)： ${data.totalAmount} 円\n`;
+  m += `◆ 精算メンバー ( ${data.participants.length} 人 )：\n`;
+  m += `（${data.participants.join(", ")}）\n`;
+  if (data.isUniform) {
+    m += `◆ 1人あたり： 約 ${data.averagePerPerson} 円\n`;
+    if (data.hasFractionalRemainder) m += `（1円単位の端数調整あり）\n`;
   }
-
-  // 元のL325 の改行は、ここに入れる
-  replyMessage += `\n`;
-
-  if (transactions.length > 0) {
-    replyMessage += `--- 支払い指示 (最小回数) ---\n`;
-    replyMessage += transactions.join("\n");
+  m += `\n`;
+  if (data.transactions.length > 0) {
+    m += `--- 支払い指示 (最小回数) ---\n`;
+    m += data.transactions.map((t) => `${t.from} → ${t.to} に ${t.amount}円`).join("\n");
   } else {
-    replyMessage += `--- 貸し借りなし！ ---\nみんなピッタリだね！`;
+    m += `--- 貸し借りなし！ ---\nみんなピッタリだね！`;
+  }
+  return m;
+}
+
+function buildSettlementFlex(data) {
+  function fmtYen(n) { return n.toLocaleString() + " 円"; }
+  function summaryRow(label, value, color) {
+    return {
+      type: "box",
+      layout: "horizontal",
+      contents: [
+        { type: "text", text: label, size: "sm", color: "#888888", flex: 4 },
+        { type: "text", text: value, size: "md", weight: "bold", align: "end", flex: 6, wrap: true, color: color || "#111111" },
+      ],
+    };
   }
 
-  // ----------------
-  // 5. ステータスを「精算済」に更新 (Ver1と同じ)
-  // ----------------
-  targetRows.forEach((rowNumber) => {
-    sheet.getRange(rowNumber, 7).setValue("精算済");
-  });
+  const summaryContents = [
+    summaryRow("支払総額", fmtYen(data.totalAmount), "#06C755"),
+    summaryRow("メンバー", data.participants.length + " 人"),
+  ];
+  if (data.isUniform) {
+    summaryContents.push(summaryRow("1人あたり", "約 " + fmtYen(data.averagePerPerson)));
+    if (data.hasFractionalRemainder) {
+      summaryContents.push({
+        type: "text", text: "※ 1円単位の端数調整あり",
+        size: "xxs", color: "#999999", align: "end", margin: "xs",
+      });
+    }
+  }
 
-  return replyMessage;
+  const bodyContents = [
+    { type: "box", layout: "vertical", spacing: "sm", contents: summaryContents },
+    {
+      type: "text", text: "メンバー: " + data.participants.join(", "),
+      size: "xxs", color: "#aaaaaa", wrap: true, margin: "sm",
+    },
+    { type: "separator", margin: "lg" },
+  ];
+
+  if (data.transactions.length > 0) {
+    bodyContents.push({
+      type: "text", text: "💸 支払い指示 (最小回数)",
+      weight: "bold", size: "md", margin: "lg",
+    });
+    bodyContents.push({
+      type: "box", layout: "vertical", spacing: "sm", margin: "md",
+      contents: data.transactions.map(function (t) {
+        return {
+          type: "box", layout: "horizontal", spacing: "sm",
+          contents: [
+            { type: "text", text: t.from, size: "sm", flex: 3, color: "#555555", wrap: true },
+            { type: "text", text: "→", size: "sm", flex: 1, align: "center", color: "#888888" },
+            { type: "text", text: t.to, size: "sm", flex: 3, weight: "bold", wrap: true },
+            { type: "text", text: fmtYen(t.amount), size: "sm", flex: 3, align: "end", color: "#06C755", weight: "bold" },
+          ],
+        };
+      }),
+    });
+  } else {
+    bodyContents.push({
+      type: "box", layout: "vertical", margin: "lg",
+      contents: [
+        { type: "text", text: "🎉 貸し借りなし！", weight: "bold", size: "md", align: "center", color: "#06C755" },
+        { type: "text", text: "みんなピッタリだね", size: "sm", align: "center", color: "#888888", margin: "sm" },
+      ],
+    });
+  }
+
+  const altText = `【精算結果】合計 ${fmtYen(data.totalAmount)} / 支払い指示 ${data.transactions.length} 件`;
+
+  return {
+    type: "flex",
+    altText: altText,
+    contents: {
+      type: "bubble",
+      header: {
+        type: "box", layout: "vertical",
+        backgroundColor: "#06C755", paddingAll: "16px",
+        contents: [
+          { type: "text", text: "🧾 精算結果", color: "#FFFFFF", weight: "bold", size: "lg" },
+        ],
+      },
+      body: {
+        type: "box", layout: "vertical", spacing: "md",
+        contents: bodyContents,
+      },
+    },
+  };
+}
+
+// 後方互換（テキストで返す）
+function calculateSettlement(sourceId, receivedText) {
+  const r = computeSettlement(sourceId, receivedText);
+  return r.ok ? formatSettlementText(r.data) : r.error;
 }
 
 // ---------------------------------------------------------------------------------

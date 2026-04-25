@@ -133,11 +133,58 @@ function __test_handleEvent_dispatch() {
 
   check("精算（成功パス）", function () {
     r = handleEvent(__mkEvent("精算\nAlice\nBob"), config);
-    __assert(r.replyText.indexOf("【精算結果】") === 0, "settlement text");
+    __assert(r.replyText.indexOf("【精算結果】") === 0, "altText fallback");
+    __assert(r.flexMessage && r.flexMessage.type === "flex", "flex message present");
+    __assert(r.flexMessage.contents.type === "bubble", "flex bubble");
+    __assert(r.flexMessage.altText.indexOf("【精算結果】") === 0, "altText set");
     __assertEq(r.quickReplyLabels, ["履歴"], "success labels");
     // 後始末: テスト中に追加した行を「精算済」にされたので、cleanup 用にもう一度 seed
     __test_cleanup();
     __test_seed_at_records();
+  });
+
+  check("computeSettlement の構造化データ", function () {
+    // seed: Alice=3000, Bob=1500, Alice=4500
+    const cs = computeSettlement(TEST_SOURCE_ID, "精算\nAlice\nBob");
+    __assert(cs.ok === true, "ok");
+    __assertEq(cs.data.totalAmount, 9000, "total");
+    __assertEq(cs.data.participants.length, 2, "participants count");
+    __assert(cs.data.isUniform === true, "all @ records → isUniform");
+    __assertEq(cs.data.averagePerPerson, 4500, "average");
+    __assertEq(cs.data.transactions.length, 1, "one transaction");
+    __assertEq(cs.data.transactions[0], { from: "Bob", to: "Alice", amount: 3000 }, "Bob → Alice 3000");
+    __test_cleanup();
+    __test_seed_at_records();
+  });
+
+  check("buildSettlementFlex のJSON構造", function () {
+    const data = {
+      totalAmount: 1000,
+      participants: ["X", "Y"],
+      transactions: [{ from: "Y", to: "X", amount: 500 }],
+      isUniform: true,
+      averagePerPerson: 500,
+      hasFractionalRemainder: false,
+    };
+    const flex = buildSettlementFlex(data);
+    __assert(flex.type === "flex", "flex type");
+    __assert(flex.contents.type === "bubble", "bubble");
+    __assert(flex.contents.header.backgroundColor === "#06C755", "green header");
+    __assert(JSON.stringify(flex).indexOf("Y") >= 0, "from name in JSON");
+    __assert(JSON.stringify(flex).indexOf("500") >= 0, "amount in JSON");
+  });
+
+  check("buildSettlementFlex 貸し借りなしレイアウト", function () {
+    const data = {
+      totalAmount: 1000,
+      participants: ["X", "Y"],
+      transactions: [],
+      isUniform: true,
+      averagePerPerson: 500,
+      hasFractionalRemainder: false,
+    };
+    const flex = buildSettlementFlex(data);
+    __assert(JSON.stringify(flex).indexOf("貸し借りなし") >= 0, "no-debt layout");
   });
 
   check("記録の仕方", function () {
