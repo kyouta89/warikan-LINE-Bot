@@ -102,16 +102,16 @@ function __test_handleEvent_dispatch() {
 
   Logger.log("--- handleEvent dispatch tests ---");
 
-  check("ヘルプ", function () {
+  check("ヘルプ → メニュー化された返信", function () {
     r = handleEvent(__mkEvent("ヘルプ"), config);
     __assert(r.shouldReply === true, "should reply");
-    __assertEq(r.quickReplyLabels, ["履歴", "メンバー"], "labels");
-    __assert(r.replyText.indexOf("【割り勘Botの使い方】") === 0, "help text");
+    __assertEq(r.quickReplyLabels, ["記録の仕方", "履歴", "精算", "メンバー", "取消"], "menu labels");
+    __assert(r.replyText.indexOf("【割り勘Botのメニュー】") === 0, "menu text");
   });
 
   check("使い方（ヘルプの別名）", function () {
     r = handleEvent(__mkEvent("使い方"), config);
-    __assert(r.replyText.indexOf("【割り勘Botの使い方】") === 0, "alias works");
+    __assert(r.replyText.indexOf("【割り勘Botのメニュー】") === 0, "alias works");
   });
 
   check("履歴", function () {
@@ -197,12 +197,13 @@ function __test_handleEvent_dispatch() {
     __assert(r.replyText.indexOf("【一部の人だけで割る場合の記録方法】") === 0, "guide text");
   });
 
-  check("Bot メンション → 案内を返す", function () {
+  check("Bot メンション → メニュー（ヘルプと同じ）", function () {
     r = handleEvent(__mkEvent("@Bot こんにちは", {
       mention: { mentionees: [{ index: 0, length: 4, isSelf: true }] }
     }), config);
     __assert(r.shouldReply === true, "should reply");
-    __assertEq(r.quickReplyLabels, ["記録の仕方", "履歴", "メンバー", "ヘルプ"], "labels");
+    __assertEq(r.quickReplyLabels, ["記録の仕方", "履歴", "精算", "メンバー", "取消"], "menu labels");
+    __assert(r.replyText.indexOf("【割り勘Botのメニュー】") === 0, "menu text");
   });
 
   check("他メンバーへのメンション → 無視", function () {

@@ -69,7 +69,7 @@ function handleEvent(event, config) {
   const senderId = event.source.userId;
 
   if (receivedText === "ヘルプ" || receivedText === "使い方") {
-    return { shouldReply: true, replyText: getHelpMessage(), quickReplyLabels: ["履歴", "メンバー"] };
+    return { shouldReply: true, replyText: MENU_TEXT, quickReplyLabels: MENU_LABELS };
   }
 
   // 「精算しよう」等の自然な会話で誤発火しないよう、完全一致 or 改行付きのみ受け付ける
@@ -200,11 +200,7 @@ function handleEvent(event, config) {
       return m.isSelf === true;
     });
     if (botMentioned) {
-      return {
-        shouldReply: true,
-        replyText: "呼んでくれてありがとう！\n何をしたい？\n下のボタンから選んでね。",
-        quickReplyLabels: ["記録の仕方", "履歴", "メンバー", "ヘルプ"],
-      };
+      return { shouldReply: true, replyText: MENU_TEXT, quickReplyLabels: MENU_LABELS };
     }
     return empty;
   }
@@ -729,15 +725,9 @@ function getKnownPayers(sourceId) {
   return Array.from(set);
 }
 
-function getHelpMessage() {
-  return (
-    "【割り勘Botの使い方】\n\n" +
-    "◆ 支払い記録\n" +
-    "@（支払った人）\n（金額）\n（内容）※任意\n\n" +
-    "→ 対象を絞りたいときは、4行目から対象者を書く\n\n" +
-    "◆ 精算\n" +
-    "精算\n（参加者A）\n（参加者B）\n...\n\n" +
-    "◆ その他\n" +
-    "履歴 / メンバー / 取消 / リセット"
-  );
-}
+// メインのメニュー文言（ヘルプとBotメンションで共通）
+const MENU_TEXT =
+  "【割り勘Botのメニュー】\n" +
+  "何をする？下のボタンから選んでね。\n\n" +
+  "（記録は @（払った人）で送ってね）";
+const MENU_LABELS = ["記録の仕方", "履歴", "精算", "メンバー", "取消"];
