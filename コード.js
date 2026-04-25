@@ -75,23 +75,67 @@ function handleEvent(event, config) {
   // 「精算しよう」等の自然な会話で誤発火しないよう、完全一致 or 改行付きのみ受け付ける
   const isSettleExact = receivedText === "精算" || receivedText === "清算";
   const isSettleMultiline = receivedText.startsWith("精算\n") || receivedText.startsWith("清算\n");
-  if (isSettleExact || isSettleMultiline) {
-    if (receivedText.includes("\n")) {
-      const r = computeSettlement(sourceId, receivedText);
-      if (r.ok) {
-        return {
-          shouldReply: true,
-          replyText: formatSettlementText(r.data),
-          flexMessage: buildSettlementFlex(r.data),
-          quickReplyLabels: ["履歴"],
-        };
-      }
-      return { shouldReply: true, replyText: r.error, quickReplyLabels: ["ヘルプ"] };
+  if (isSettleMultiline) {
+    const r = computeSettlement(sourceId, receivedText);
+    if (r.ok) {
+      return {
+        shouldReply: true,
+        replyText: formatSettlementText(r.data),
+        flexMessage: buildSettlementFlex(r.data),
+        quickReplyLabels: ["履歴"],
+      };
+    }
+    return { shouldReply: true, replyText: r.error, quickReplyLabels: ["ヘルプ"] };
+  }
+  if (isSettleExact) {
+    // 履歴のメンバーで自動精算を提案
+    const payers = getKnownPayers(sourceId);
+    if (payers.length === 0) {
+      return {
+        shouldReply: true,
+        replyText: "まだ精算する記録がないみたいだよ。",
+        quickReplyLabels: ["記録の仕方", "履歴"],
+      };
     }
     return {
       shouldReply: true,
-      replyText: "「精算」コマンドの使い方が違うみたい！\n\n精算\n（参加者A）\n（参加者B）\n（参加者C）\n\nのように、改行して「参加者全員」の名前を送ってね。",
-      quickReplyLabels: ["メンバー", "ヘルプ"],
+      replyText:
+        "未精算の履歴に出てくるメンバーで精算するよ：\n\n" +
+        payers.map(function (n) { return "・" + n; }).join("\n") +
+        "\n\nこれで OK？\n（0円の参加者がいる場合は「メンバーを追加して精算」を選んでね）",
+      quickReplyLabels: ["このメンバーで精算", "メンバーを追加して精算"],
+    };
+  }
+
+  if (receivedText === "このメンバーで精算") {
+    const payers = getKnownPayers(sourceId);
+    if (payers.length === 0) {
+      return {
+        shouldReply: true,
+        replyText: "精算する記録がないみたい。",
+        quickReplyLabels: ["記録の仕方", "履歴"],
+      };
+    }
+    const r = computeSettlement(sourceId, "精算\n" + payers.join("\n"));
+    if (r.ok) {
+      return {
+        shouldReply: true,
+        replyText: formatSettlementText(r.data),
+        flexMessage: buildSettlementFlex(r.data),
+        quickReplyLabels: ["履歴"],
+      };
+    }
+    return { shouldReply: true, replyText: r.error, quickReplyLabels: ["ヘルプ"] };
+  }
+
+  if (receivedText === "メンバーを追加して精算") {
+    return {
+      shouldReply: true,
+      replyText:
+        "0円参加者も含めて精算するときは、参加者を全員列挙して送ってね：\n\n" +
+        "精算\n（参加者A）\n（参加者B）\n...\n\n" +
+        "（払った人だけでよければ「このメンバーで精算」を選んでね）",
+      quickReplyLabels: ["履歴"],
     };
   }
 
@@ -670,6 +714,21 @@ function showMembers(sourceId) {
 // ---------------------------------------------------------------------------------
 // ★★★ ここから下が新しく追加した「ヘルプ」専用の関数 ★★★
 // ---------------------------------------------------------------------------------
+// 未精算の履歴に出てくる「払った人」のユニーク一覧を返す
+function getKnownPayers(sourceId) {
+  const config = getConfig();
+  const sheet = SpreadsheetApp.openById(config.SPREADSHEET_ID).getSheetByName(config.SHEET_NAME);
+  const data = sheet.getDataRange().getValues();
+  const set = new Set();
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    if (row[1] === sourceId && row[6] === "記録済" && row[3]) {
+      set.add(row[3]);
+    }
+  }
+  return Array.from(set);
+}
+
 function getHelpMessage() {
   return (
     "【割り勘Botの使い方】\n\n" +

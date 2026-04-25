@@ -125,12 +125,6 @@ function __test_handleEvent_dispatch() {
     __assertEq(r.quickReplyLabels, ["履歴", "ヘルプ"], "labels");
   });
 
-  check("精算（参加者なし＝フォーマットエラー）", function () {
-    r = handleEvent(__mkEvent("精算"), config);
-    __assertEq(r.quickReplyLabels, ["メンバー", "ヘルプ"], "error labels");
-    __assert(r.replyText.indexOf("「精算」コマンドの使い方") === 0, "error text");
-  });
-
   check("精算（成功パス）", function () {
     r = handleEvent(__mkEvent("精算\nAlice\nBob"), config);
     __assert(r.replyText.indexOf("【精算結果】") === 0, "altText fallback");
@@ -268,10 +262,35 @@ function __test_handleEvent_dispatch() {
     __assert(r.shouldReply === false, "清算 variant ignored");
   });
 
-  check("「精算」単体は引き続きフォーマット案内を返す", function () {
+  check("「精算」単体は履歴メンバーで自動提案", function () {
     r = handleEvent(__mkEvent("精算"), config);
-    __assert(r.shouldReply === true, "still triggers");
-    __assert(r.replyText.indexOf("「精算」コマンドの使い方") === 0, "format guide");
+    __assert(r.shouldReply === true, "should reply");
+    __assert(r.replyText.indexOf("未精算の履歴") === 0, "auto proposal");
+    __assertEq(r.quickReplyLabels, ["このメンバーで精算", "メンバーを追加して精算"], "labels");
+  });
+
+  check("「このメンバーで精算」で実行される", function () {
+    r = handleEvent(__mkEvent("このメンバーで精算"), config);
+    __assert(r.shouldReply === true, "should reply");
+    __assert(r.replyText.indexOf("【精算結果】") === 0, "executes settlement");
+    __assert(r.flexMessage && r.flexMessage.type === "flex", "flex returned");
+    // 後始末
+    __test_cleanup();
+    __test_seed_at_records();
+  });
+
+  check("「メンバーを追加して精算」で手動フォーマット案内", function () {
+    r = handleEvent(__mkEvent("メンバーを追加して精算"), config);
+    __assert(r.shouldReply === true, "should reply");
+    __assert(r.replyText.indexOf("0円参加者") === 0, "manual guide");
+  });
+
+  check("精算する記録がない場合、「精算」単体は記録への案内を返す", function () {
+    __test_cleanup();
+    r = handleEvent(__mkEvent("精算"), config);
+    __assert(r.replyText.indexOf("まだ精算する記録がない") === 0, "no record guidance");
+    __assertEq(r.quickReplyLabels, ["記録の仕方", "履歴"], "labels");
+    __test_seed_at_records();  // 後続テストのために再 seed
   });
 
   check("テキスト以外（スタンプ等） → 無視", function () {
