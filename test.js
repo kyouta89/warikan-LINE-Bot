@@ -301,6 +301,39 @@ function __test_handleEvent_dispatch() {
     __assert(r.shouldReply === false, "ignored");
   });
 
+  check("取消（一覧表示）", function () {
+    r = handleEvent(__mkEvent("取消"), config);
+    __assert(r.shouldReply === true, "should reply");
+    __assert(r.replyText.indexOf("最近の記録") === 0, "shows list");
+    __assert(r.replyText.indexOf("Alice") >= 0 || r.replyText.indexOf("Bob") >= 0, "includes records");
+    __assert(r.quickReplyLabels.indexOf("取消1") === 0, "first button is 取消1");
+    __assert(r.quickReplyLabels.indexOf("キャンセル") >= 0, "has cancel button");
+  });
+
+  check("取消N（指定の記録を取消）", function () {
+    // seed: Alice 3000, Bob 1500, Alice 4500 (3rd is most recent)
+    r = handleEvent(__mkEvent("取消1"), config);
+    __assert(r.replyText.indexOf("取消したよ") === 0, "executes");
+    __assert(r.replyText.indexOf("Alice") >= 0, "names latest record");
+    // 後始末
+    __test_cleanup();
+    __test_seed_at_records();
+  });
+
+  check("取消（記録なし時）", function () {
+    __test_cleanup();
+    r = handleEvent(__mkEvent("取消"), config);
+    __assert(r.replyText.indexOf("取消できる記録がない") === 0, "no records message");
+    __assertEq(r.quickReplyLabels, ["記録の仕方", "履歴"], "guide labels");
+    __test_seed_at_records();
+  });
+
+  check("キャンセルコマンド", function () {
+    r = handleEvent(__mkEvent("キャンセル"), config);
+    __assert(r.replyText.indexOf("OK") === 0, "ack");
+    __assertEq(r.quickReplyLabels, ["履歴"], "labels");
+  });
+
   check("normalizeName: 全角英数→半角、カナ→ひら、空白trim", function () {
     __assertEq(normalizeName("タロウ"), "たろう", "kata→hira");
     __assertEq(normalizeName("Ｔａｒｏ"), "Taro", "fullwidth→halfwidth");

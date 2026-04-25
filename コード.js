@@ -162,7 +162,56 @@ function handleEvent(event, config) {
   }
 
   if (receivedText === "取消" || receivedText === "取り消し") {
-    return { shouldReply: true, replyText: cancelLastRecord(senderId), quickReplyLabels: ["履歴"] };
+    const records = getRecentRecords(sourceId, 5);
+    if (records.length === 0) {
+      return {
+        shouldReply: true,
+        replyText: "取消できる記録がないみたい。",
+        quickReplyLabels: ["記録の仕方", "履歴"],
+      };
+    }
+    const lines = records.map(function (r, idx) {
+      let line = (idx + 1) + ". " + r.payer + " " + r.amount + "円";
+      if (r.content) line += " " + r.content;
+      if (r.targets) line += " (対象: " + r.targets.replace(/,/g, ", ") + ")";
+      return line;
+    });
+    const labels = records.map(function (_, idx) { return "取消" + (idx + 1); });
+    labels.push("キャンセル");
+    return {
+      shouldReply: true,
+      replyText:
+        "最近の記録（最新" + records.length + "件）:\n\n" +
+        lines.join("\n") +
+        "\n\nどれを取消する？",
+      quickReplyLabels: labels,
+    };
+  }
+
+  const cancelMatch = receivedText.match(/^取消([1-5])$/);
+  if (cancelMatch) {
+    const idx = parseInt(cancelMatch[1], 10) - 1;
+    const records = getRecentRecords(sourceId, 5);
+    if (idx >= records.length) {
+      return {
+        shouldReply: true,
+        replyText: "その番号の記録が見つからないみたい。\nもう一度「取消」で一覧を出してね。",
+        quickReplyLabels: ["取消", "履歴"],
+      };
+    }
+    const target = records[idx];
+    cancelRecordByRow(target.rowNumber);
+    let msg = "取消したよ。\n" + target.payer + " " + target.amount + "円";
+    if (target.content) msg += " " + target.content;
+    return { shouldReply: true, replyText: msg, quickReplyLabels: ["履歴"] };
+  }
+
+  if (receivedText === "キャンセル") {
+    return {
+      shouldReply: true,
+      replyText: "OK、取消しなかったよ。",
+      quickReplyLabels: ["履歴"],
+    };
   }
 
   // 「＃」は「@」のエイリアスとして扱う（後方互換）。プレフィックスを @ に正規化。
@@ -542,43 +591,32 @@ function zenkakuToHankaku(str) {
   });
 }
 
-// ---------------------------------------------------------------------------------
-// ★★★ ここから下が新しく追加した「直前の記録を取消」専用の関数 ★★★
-// ---------------------------------------------------------------------------------
-function cancelLastRecord(senderId) {
+// グループ内の最新 N 件の「記録済」レコードを返す（新しい順、行番号付き）
+function getRecentRecords(sourceId, limit) {
   const config = getConfig();
-  const spreadSheet = SpreadsheetApp.openById(config.SPREADSHEET_ID);
-  const sheet = spreadSheet.getSheetByName(config.SHEET_NAME);
-
-  // シートの全データを取得
-  const allData = sheet.getDataRange().getValues();
-
-  // シートの「下から上へ」とスキャンしていく（一番最後の記録を見つけるため）
-  for (let i = allData.length - 1; i >= 1; i--) {
-    // i=0 はヘッダーなので無視
-    const row = allData[i];
-    const rowSenderId = row[2]; // C列: 送信者ID
-    const status = row[6]; // G列: ステータス
-
-    // 「コマンドを送った本人」の、
-    // 「まだ精算されてない（記録済）」の記録を見つけたら
-    if (rowSenderId === senderId && status === "記録済") {
-      const rowNumber = i + 1; // 配列のインデックス(0始まり)を行番号(1始まり)に変換
-
-      // G列（7列目）のステータスを「取消済」に変更
-      sheet.getRange(rowNumber, 7).setValue("取消済");
-
-      // ユーザーにどの記録を消したか通知
-      const payer = row[3];
-      const amount = row[4];
-      const content = row[5] || "（内容なし）";
-
-      return `【記録を取消しました】\n${payer}: ${amount}円 (${content})`;
+  const sheet = SpreadsheetApp.openById(config.SPREADSHEET_ID).getSheetByName(config.SHEET_NAME);
+  const data = sheet.getDataRange().getValues();
+  const records = [];
+  for (let i = data.length - 1; i >= 1 && records.length < limit; i--) {
+    const row = data[i];
+    if (row[1] === sourceId && row[6] === "記録済") {
+      records.push({
+        rowNumber: i + 1,
+        payer: row[3],
+        amount: row[4],
+        content: row[5] || "",
+        targets: row[7] || "",
+      });
     }
   }
+  return records;
+}
 
-  // ループを全部回っても見つからなかった場合
-  return "取消できる、あなた自身の「未精算の記録」が見つかりませんでした。";
+// 指定した行のステータスを「取消済」に変更
+function cancelRecordByRow(rowNumber) {
+  const config = getConfig();
+  const sheet = SpreadsheetApp.openById(config.SPREADSHEET_ID).getSheetByName(config.SHEET_NAME);
+  sheet.getRange(rowNumber, 7).setValue("取消済");
 }
 
 function showHistory(sourceId) {
