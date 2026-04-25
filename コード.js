@@ -60,7 +60,21 @@ function sendReply(replyToken, result) {
 // LINE API は呼ばないのでテストしやすい。スプレッドシートI/Oは内側の関数に閉じている。
 function handleEvent(event, config) {
   const empty = { shouldReply: false, replyText: "", quickReplyLabels: [] };
-  if (!event || event.type !== "message" || !event.message || event.message.type !== "text") {
+  if (!event) return empty;
+
+  // Bot がグループ/トークに招待された瞬間にウェルカム + メニューを送る
+  if (event.type === "join") {
+    return {
+      shouldReply: true,
+      replyText:
+        "こんにちは！割り勘Botです 🧳\n\n" +
+        "このグループでの支払いを記録して、最後に精算できるよ。\n" +
+        "下のボタンから始めよう！",
+      quickReplyLabels: MENU_LABELS,
+    };
+  }
+
+  if (event.type !== "message" || !event.message || event.message.type !== "text") {
     return empty;
   }
 
@@ -69,31 +83,74 @@ function handleEvent(event, config) {
   const senderId = event.source.userId;
 
   if (receivedText === "ヘルプ" || receivedText === "使い方") {
-    return { shouldReply: true, replyText: getHelpMessage(), quickReplyLabels: ["履歴", "メンバー"] };
+    return { shouldReply: true, replyText: MENU_TEXT, quickReplyLabels: MENU_LABELS };
   }
 
-  if (receivedText.startsWith("精算") || receivedText.startsWith("清算")) {
-    if (receivedText.includes("\n")) {
-      const r = computeSettlement(sourceId, receivedText);
-      if (r.ok) {
-        return {
-          shouldReply: true,
-          replyText: formatSettlementText(r.data),
-          flexMessage: buildSettlementFlex(r.data),
-          quickReplyLabels: ["履歴"],
-        };
-      }
-      return { shouldReply: true, replyText: r.error, quickReplyLabels: ["ヘルプ"] };
+  // 「精算しよう」等の自然な会話で誤発火しないよう、完全一致 or 改行付きのみ受け付ける
+  const isSettleExact = receivedText === "精算" || receivedText === "清算";
+  const isSettleMultiline = receivedText.startsWith("精算\n") || receivedText.startsWith("清算\n");
+  if (isSettleMultiline) {
+    const r = computeSettlement(sourceId, receivedText);
+    if (r.ok) {
+      return {
+        shouldReply: true,
+        replyText: formatSettlementText(r.data),
+        flexMessage: buildSettlementFlex(r.data),
+        quickReplyLabels: ["履歴"],
+      };
+    }
+    return { shouldReply: true, replyText: r.error, quickReplyLabels: ["ヘルプ"] };
+  }
+  if (isSettleExact) {
+    // 履歴のメンバーで自動精算を提案
+    const payers = getKnownPayers(sourceId);
+    if (payers.length === 0) {
+      return {
+        shouldReply: true,
+        replyText: "まだ精算する記録がないみたいだよ。",
+        quickReplyLabels: ["記録の仕方", "履歴"],
+      };
     }
     return {
       shouldReply: true,
-      replyText: "「精算」コマンドの使い方が違うみたい！\n\n精算\n（参加者A）\n（参加者B）\n（参加者C）\n\nのように、改行して「参加者全員」の名前を送ってね。",
-      quickReplyLabels: ["メンバー", "ヘルプ"],
+      replyText:
+        "未精算の履歴に出てくるメンバーで精算するよ：\n\n" +
+        payers.map(function (n) { return "・" + n; }).join("\n") +
+        "\n\nこれで OK？\n（0円の参加者がいる場合は「メンバーを追加して精算」を選んでね）",
+      quickReplyLabels: ["このメンバーで精算", "メンバーを追加して精算"],
     };
   }
 
-  if (receivedText === "リセット") {
-    return { shouldReply: true, replyText: resetAllRecords(sourceId), quickReplyLabels: [] };
+  if (receivedText === "このメンバーで精算") {
+    const payers = getKnownPayers(sourceId);
+    if (payers.length === 0) {
+      return {
+        shouldReply: true,
+        replyText: "精算する記録がないみたい。",
+        quickReplyLabels: ["記録の仕方", "履歴"],
+      };
+    }
+    const r = computeSettlement(sourceId, "精算\n" + payers.join("\n"));
+    if (r.ok) {
+      return {
+        shouldReply: true,
+        replyText: formatSettlementText(r.data),
+        flexMessage: buildSettlementFlex(r.data),
+        quickReplyLabels: ["履歴"],
+      };
+    }
+    return { shouldReply: true, replyText: r.error, quickReplyLabels: ["ヘルプ"] };
+  }
+
+  if (receivedText === "メンバーを追加して精算") {
+    return {
+      shouldReply: true,
+      replyText:
+        "0円参加者も含めて精算するときは、参加者を全員列挙して送ってね：\n\n" +
+        "精算\n（参加者A）\n（参加者B）\n...\n\n" +
+        "（払った人だけでよければ「このメンバーで精算」を選んでね）",
+      quickReplyLabels: ["履歴"],
+    };
   }
 
   if (receivedText === "メンバー") {
@@ -101,18 +158,104 @@ function handleEvent(event, config) {
   }
 
   if (receivedText === "履歴") {
-    return { shouldReply: true, replyText: showHistory(sourceId), quickReplyLabels: ["メンバー", "ヘルプ"] };
+    const histData = getHistoryData(sourceId);
+    if (histData.records.length === 0) {
+      return {
+        shouldReply: true,
+        replyText: "まだ「記録済」のデータは1件もないみたいだよ。",
+        quickReplyLabels: ["記録の仕方"],
+      };
+    }
+    return {
+      shouldReply: true,
+      replyText: formatHistoryText(histData),
+      flexMessage: buildHistoryFlex(histData),
+      quickReplyLabels: ["メンバー", "ヘルプ"],
+    };
+  }
+
+  // 隠しコマンド: 精算済の過去記録を見る（メニューには出さず、知ってる人だけが叩ける）
+  if (receivedText === "過去の履歴") {
+    const pastData = getHistoryData(sourceId, { status: "精算済" });
+    if (pastData.records.length === 0) {
+      return {
+        shouldReply: true,
+        replyText: "過去に精算した記録はまだないみたいだよ。",
+        quickReplyLabels: ["履歴"],
+      };
+    }
+    const opts = {
+      title: "【過去の履歴 (精算済)】",
+      headerText: "📜 過去の履歴 (" + pastData.totalCount + "件)",
+      altTextPrefix: "【過去の履歴】",
+      headerBg: "#6c757d",   // muted grey: アーカイブ感
+      totalColor: "#6c757d",
+    };
+    return {
+      shouldReply: true,
+      replyText: formatHistoryText(pastData, opts),
+      flexMessage: buildHistoryFlex(pastData, opts),
+      quickReplyLabels: ["履歴"],
+    };
   }
 
   if (receivedText === "取消" || receivedText === "取り消し") {
-    return { shouldReply: true, replyText: cancelLastRecord(senderId), quickReplyLabels: ["履歴"] };
+    const records = getRecentRecords(sourceId, 5);
+    if (records.length === 0) {
+      return {
+        shouldReply: true,
+        replyText: "取消できる記録がないみたい。",
+        quickReplyLabels: ["記録の仕方", "履歴"],
+      };
+    }
+    const lines = records.map(function (r, idx) {
+      let line = (idx + 1) + ". " + r.payer + " " + r.amount + "円";
+      if (r.content) line += " " + r.content;
+      if (r.targets) line += " (対象: " + r.targets.replace(/,/g, ", ") + ")";
+      return line;
+    });
+    const labels = records.map(function (_, idx) { return "取消" + (idx + 1); });
+    labels.push("キャンセル");
+    return {
+      shouldReply: true,
+      replyText:
+        "最近の記録（最新" + records.length + "件）:\n\n" +
+        lines.join("\n") +
+        "\n\nどれを取消する？",
+      quickReplyLabels: labels,
+    };
   }
 
-  // 限定割り勘 (＃) — 「@」より先に判定する
+  const cancelMatch = receivedText.match(/^取消([1-5])$/);
+  if (cancelMatch) {
+    const idx = parseInt(cancelMatch[1], 10) - 1;
+    const records = getRecentRecords(sourceId, 5);
+    if (idx >= records.length) {
+      return {
+        shouldReply: true,
+        replyText: "その番号の記録が見つからないみたい。\nもう一度「取消」で一覧を出してね。",
+        quickReplyLabels: ["取消", "履歴"],
+      };
+    }
+    const target = records[idx];
+    cancelRecordByRow(target.rowNumber);
+    let msg = "取消したよ。\n" + target.payer + " " + target.amount + "円";
+    if (target.content) msg += " " + target.content;
+    return { shouldReply: true, replyText: msg, quickReplyLabels: ["履歴"] };
+  }
+
+  if (receivedText === "キャンセル") {
+    return {
+      shouldReply: true,
+      replyText: "OK、取消しなかったよ。",
+      quickReplyLabels: ["履歴"],
+    };
+  }
+
+  // 「＃」は「@」のエイリアスとして扱う（後方互換）。プレフィックスを @ に正規化。
   if (receivedText.startsWith("#") || receivedText.startsWith("＃")) {
-    const text = registerLimitedPayment(receivedText, sourceId, senderId, config);
-    const labels = text.indexOf("【限定記録しました！】") === 0 ? ["履歴", "取消"] : ["ヘルプ"];
-    return { shouldReply: true, replyText: text, quickReplyLabels: labels };
+    const normalized = "@" + receivedText.substring(1);
+    return registerPayment(normalized, sourceId, senderId, config);
   }
 
   if (receivedText === "記録の仕方") {
@@ -131,7 +274,6 @@ function handleEvent(event, config) {
       shouldReply: true,
       replyText:
         "【全員で割る場合の記録方法】\n\n" +
-        "下のように送ってね（改行して2〜3行）：\n\n" +
         "@（支払った人）\n（金額）\n（内容）※任意\n\n" +
         "▼ 例\n@たろう\n3000\nランチ",
       quickReplyLabels: ["履歴", "ヘルプ"],
@@ -143,9 +285,9 @@ function handleEvent(event, config) {
       shouldReply: true,
       replyText:
         "【一部の人だけで割る場合の記録方法】\n\n" +
-        "下のように送ってね（4行目以降に対象者を全員列挙）：\n\n" +
-        "＃（支払った人）\n（金額）\n（内容）\n（対象者A）\n（対象者B）\n...\n\n" +
-        "▼ 例\n＃たろう\n6000\nカラオケ\nたろう\nはなこ",
+        "@（支払った人）\n（金額）\n（内容）\n（対象者A）\n（対象者B）\n...\n\n" +
+        "※ 4行目以降に対象者を書くと、その人たちだけで割り勘になります\n\n" +
+        "▼ 例\n@たろう\n6000\nカラオケ\nたろう\nはなこ",
       quickReplyLabels: ["履歴", "ヘルプ"],
     };
   }
@@ -155,52 +297,60 @@ function handleEvent(event, config) {
       return m.isSelf === true;
     });
     if (botMentioned) {
-      return {
-        shouldReply: true,
-        replyText: "呼んでくれてありがとう！\n何をしたい？\n下のボタンから選んでね。",
-        quickReplyLabels: ["記録の仕方", "履歴", "メンバー", "ヘルプ"],
-      };
+      return { shouldReply: true, replyText: MENU_TEXT, quickReplyLabels: MENU_LABELS };
     }
     return empty;
   }
 
   if (receivedText.startsWith("@") || receivedText.startsWith("＠")) {
-    return registerSimplePayment(receivedText, sourceId, senderId, config);
+    return registerPayment(receivedText, sourceId, senderId, config);
   }
 
   return empty;
 }
 
-// @ コマンドの記録処理（handleEventから切り出し、{replyText, quickReplyLabels, shouldReply}を返す）
-function registerSimplePayment(receivedText, sourceId, senderId, config) {
-  const fmtError2or3 = {
+// @コマンドの記録処理（@ と ＃ の統合版）
+// 1行目: @ + 支払い人, 2行目: 金額, 3行目: 内容（任意）, 4行目以降: 対象者リスト（あれば限定割り勘）
+function registerPayment(receivedText, sourceId, senderId, config) {
+  const fmtError = {
     shouldReply: true,
-    replyText: "ごめん、フォーマットが違うみたい。\n\n@（支払った人）\n（金額）\n（内容は任意）\n\nの2行か3行で送ってね！",
-    quickReplyLabels: ["ヘルプ"],
-  };
-  const fmtErrorAmount = {
-    shouldReply: true,
-    replyText: "ごめん、フォーマットが違うみたい。\n\n@（支払った人）\n（金額）\n（内容は任意）\n\n金額はちゃんと「数字」で送ってね！",
-    quickReplyLabels: ["ヘルプ"],
+    replyText:
+      "ごめん、フォーマットが違うみたい。\n\n" +
+      "@（支払った人）\n（金額）\n（内容）※任意\n（対象者A）\n（対象者B）...\n\n" +
+      "金額は「数字」で送ってね！\n対象を絞らないなら3行までで OK。",
+    quickReplyLabels: ["記録の仕方"],
   };
 
   const parts = receivedText.split("\n");
   parts[0] = parts[0].substring(1).trim();
-  if (parts.length !== 2 && parts.length !== 3) return fmtError2or3;
+  if (parts.length < 2) return fmtError;
 
   const payer = parts[0];
   const amountString = parts[1].trim();
-  let hankaku = zenkakuToHankaku(amountString).replace(/[^0-9]/g, "");
-  if (!payer || !hankaku || isNaN(hankaku)) return fmtErrorAmount;
+  const hankaku = zenkakuToHankaku(amountString).replace(/[^0-9]/g, "");
+  if (!payer || !hankaku || isNaN(hankaku)) return fmtError;
 
-  const spreadSheet = SpreadsheetApp.openById(config.SPREADSHEET_ID);
-  const sheet = spreadSheet.getSheetByName(config.SHEET_NAME);
   const amount = Number(hankaku);
-  const content = parts.length === 3 ? parts[2].trim() : "";
-  sheet.appendRow([new Date(), sourceId, senderId, payer, amount, content, "記録済", ""]);
+  const content = parts.length >= 3 ? parts[2].trim() : "";
+  const targets = parts.length >= 4
+    ? parts.slice(3).map(function (s) { return s.trim(); }).filter(function (s) { return s.length > 0; })
+    : [];
+  const limitedMembersString = targets.length > 0 ? targets.join(",") : "";
+
+  // 記録前にタイポチェック（記録後だと新規入力の名前と一致してしまう）
+  const similar = findSimilarPayer(payer, sourceId);
+
+  const sheet = SpreadsheetApp.openById(config.SPREADSHEET_ID).getSheetByName(config.SHEET_NAME);
+  sheet.appendRow([new Date(), sourceId, senderId, payer, amount, content, "記録済", limitedMembersString]);
 
   let replyText = `【記録しました！】\n支払った人： ${payer}\n金額： ${amount}円`;
   if (content) replyText += `\n内容： ${content}`;
+  if (targets.length > 0) {
+    replyText += `\n\n★対象者 ( ${targets.length}名 )\n${targets.join(", ")}`;
+  }
+  if (similar) {
+    replyText += `\n\n⚠ もしかして「${similar}」のこと？\n違うなら気にしないでOK。\nタイポなら「取消」で消して入れ直してね。`;
+  }
   return { shouldReply: true, replyText: replyText, quickReplyLabels: ["履歴", "取消"] };
 }
 
@@ -479,136 +629,163 @@ function zenkakuToHankaku(str) {
   });
 }
 
-// ---------------------------------------------------------------------------------
-// ★★★ ここから下が新しく追加した「直前の記録を取消」専用の関数 ★★★
-// ---------------------------------------------------------------------------------
-function cancelLastRecord(senderId) {
+// グループ内の最新 N 件の「記録済」レコードを返す（新しい順、行番号付き）
+function getRecentRecords(sourceId, limit) {
   const config = getConfig();
-  const spreadSheet = SpreadsheetApp.openById(config.SPREADSHEET_ID);
-  const sheet = spreadSheet.getSheetByName(config.SHEET_NAME);
-
-  // シートの全データを取得
-  const allData = sheet.getDataRange().getValues();
-
-  // シートの「下から上へ」とスキャンしていく（一番最後の記録を見つけるため）
-  for (let i = allData.length - 1; i >= 1; i--) {
-    // i=0 はヘッダーなので無視
-    const row = allData[i];
-    const rowSenderId = row[2]; // C列: 送信者ID
-    const status = row[6]; // G列: ステータス
-
-    // 「コマンドを送った本人」の、
-    // 「まだ精算されてない（記録済）」の記録を見つけたら
-    if (rowSenderId === senderId && status === "記録済") {
-      const rowNumber = i + 1; // 配列のインデックス(0始まり)を行番号(1始まり)に変換
-
-      // G列（7列目）のステータスを「取消済」に変更
-      sheet.getRange(rowNumber, 7).setValue("取消済");
-
-      // ユーザーにどの記録を消したか通知
-      const payer = row[3];
-      const amount = row[4];
-      const content = row[5] || "（内容なし）";
-
-      return `【記録を取消しました】\n${payer}: ${amount}円 (${content})`;
+  const sheet = SpreadsheetApp.openById(config.SPREADSHEET_ID).getSheetByName(config.SHEET_NAME);
+  const data = sheet.getDataRange().getValues();
+  const records = [];
+  for (let i = data.length - 1; i >= 1 && records.length < limit; i--) {
+    const row = data[i];
+    if (row[1] === sourceId && row[6] === "記録済") {
+      records.push({
+        rowNumber: i + 1,
+        payer: row[3],
+        amount: row[4],
+        content: row[5] || "",
+        targets: row[7] || "",
+      });
     }
   }
-
-  // ループを全部回っても見つからなかった場合
-  return "取消できる、あなた自身の「未精算の記録」が見つかりませんでした。";
+  return records;
 }
 
-// ---------------------------------------------------------------------------------
-// ★★★ ここから下が新しく追加した「全記録リセット」専用の関数 ★★★
-// ---------------------------------------------------------------------------------
-function resetAllRecords(sourceId) {
+// 指定した行のステータスを「取消済」に変更
+function cancelRecordByRow(rowNumber) {
   const config = getConfig();
-  const spreadSheet = SpreadsheetApp.openById(config.SPREADSHEET_ID);
-  const sheet = spreadSheet.getSheetByName(config.SHEET_NAME);
+  const sheet = SpreadsheetApp.openById(config.SPREADSHEET_ID).getSheetByName(config.SHEET_NAME);
+  sheet.getRange(rowNumber, 7).setValue("取消済");
+}
 
-  // シートの全データを取得
+// 履歴の構造化データを取得。options.status で対象ステータスを切替（既定: "記録済"）。
+function getHistoryData(sourceId, options) {
+  options = options || {};
+  const status = options.status || "記録済";
+  const limit = typeof options.limit === "number" ? options.limit : 10;
+  const config = getConfig();
+  const sheet = SpreadsheetApp.openById(config.SPREADSHEET_ID).getSheetByName(config.SHEET_NAME);
   const allData = sheet.getDataRange().getValues();
 
-  const targetRows = []; // リセット対象の「行番号」
-
-  // 1行目（ヘッダー）を飛ばして2行目からチェック（上から全部スキャン）
+  const all = [];
+  let totalAmount = 0;
   for (let i = 1; i < allData.length; i++) {
     const row = allData[i];
-    const rowSourceId = row[1]; // B列: グループID
-    const status = row[6]; // G列: ステータス
-
-    // 「グループIDが一致」かつ「ステータスが "記録済"」の行を対象にする
-    if (rowSourceId === sourceId && status === "記録済") {
-      targetRows.push(i + 1); // (iは0始まり、行番号は1始まりなので +1)
+    if (row[1] === sourceId && row[6] === status && typeof row[4] === "number" && !isNaN(row[4])) {
+      all.push({
+        payer: row[3],
+        amount: row[4],
+        content: row[5] || "",
+        targets: row[7] || "",
+      });
+      totalAmount += row[4];
     }
   }
+  const records = all.slice(-limit);
+  return {
+    records: records,
+    totalAmount: totalAmount,
+    totalCount: all.length,
+    omittedCount: Math.max(0, all.length - records.length),
+  };
+}
 
-  // ----------------
-  // リセット対象があるかチェック
-  // ----------------
-  if (targetRows.length === 0) {
-    return "リセットする「記録済」のデータはありませんでした。";
+function formatHistoryText(data, opts) {
+  opts = opts || {};
+  const title = opts.title || "【未精算の履歴】";
+  if (data.records.length === 0) {
+    return opts.emptyMsg || "まだ「記録済」のデータは1件もないみたいだよ。";
   }
+  let m = title + "\n\n";
+  if (data.omittedCount > 0) {
+    m += "（前の" + data.omittedCount + "件を省略 / 最新" + data.records.length + "件）\n\n";
+  }
+  data.records.forEach(function (r) {
+    let line = "・ " + r.payer + ": " + r.amount + "円";
+    if (r.content) line += " (" + r.content + ")";
+    if (r.targets) line += " [対象: " + r.targets.replace(/,/g, ", ") + "]";
+    m += line + "\n";
+  });
+  m += "\n----------------\n合計: " + data.totalAmount + "円";
+  return m;
+}
 
-  // ----------------
-  // ステータスを「リセット済」に更新
-  // ----------------
-  targetRows.forEach((rowNumber) => {
-    // G列（7列目）のステータスを書き換える
-    sheet.getRange(rowNumber, 7).setValue("リセット済");
+function buildHistoryFlex(data, opts) {
+  opts = opts || {};
+  const headerText = opts.headerText || ("📒 未精算の履歴 (" + data.totalCount + "件)");
+  const altTextPrefix = opts.altTextPrefix || "【未精算の履歴】";
+  const headerBg = opts.headerBg || "#06C755";
+  const totalColor = opts.totalColor || "#06C755";
+  function fmtYen(n) { return n.toLocaleString() + " 円"; }
+
+  const rowItems = data.records.map(function (r) {
+    const lines = [
+      {
+        type: "box", layout: "horizontal",
+        contents: [
+          { type: "text", text: r.payer, size: "sm", color: "#555555", flex: 5, weight: "bold", wrap: true },
+          { type: "text", text: fmtYen(r.amount), size: "sm", flex: 4, align: "end", color: "#111111" },
+        ],
+      },
+    ];
+    const subParts = [];
+    if (r.content) subParts.push(r.content);
+    if (r.targets) subParts.push("対象: " + r.targets.replace(/,/g, ", "));
+    if (subParts.length > 0) {
+      lines.push({
+        type: "text", text: subParts.join(" / "),
+        size: "xxs", color: "#999999", wrap: true, margin: "xs",
+      });
+    }
+    return {
+      type: "box", layout: "vertical", spacing: "xs",
+      paddingTop: "sm", paddingBottom: "sm",
+      contents: lines,
+    };
   });
 
-  return `【リセット完了】\n${targetRows.length}件の未精算データをすべてリセットしました。`;
+  const bodyContents = [];
+  if (data.omittedCount > 0) {
+    bodyContents.push({
+      type: "text",
+      text: "（前の " + data.omittedCount + " 件を省略 / 最新 " + data.records.length + " 件）",
+      size: "xxs", color: "#aaaaaa", align: "center", margin: "sm",
+    });
+  }
+  rowItems.forEach(function (row, idx) {
+    bodyContents.push(row);
+    if (idx < rowItems.length - 1) bodyContents.push({ type: "separator" });
+  });
+  bodyContents.push({ type: "separator", margin: "md" });
+  bodyContents.push({
+    type: "box", layout: "horizontal", margin: "md",
+    contents: [
+      { type: "text", text: "合計", size: "sm", color: "#888888", flex: 4 },
+      { type: "text", text: fmtYen(data.totalAmount), size: "md", weight: "bold", align: "end", flex: 6, color: totalColor },
+    ],
+  });
+
+  return {
+    type: "flex",
+    altText: altTextPrefix + data.records.length + "件 / 合計 " + fmtYen(data.totalAmount),
+    contents: {
+      type: "bubble",
+      header: {
+        type: "box", layout: "vertical",
+        backgroundColor: headerBg, paddingAll: "16px",
+        contents: [
+          { type: "text", text: headerText, color: "#FFFFFF", weight: "bold", size: "lg" },
+        ],
+      },
+      body: {
+        type: "box", layout: "vertical", spacing: "none", contents: bodyContents,
+      },
+    },
+  };
 }
 
-// ---------------------------------------------------------------------------------
-// ★★★ ここから下が新しく追加した「履歴表示」専用の関数 ★★★
-// ---------------------------------------------------------------------------------
+// 後方互換（テキストで返す）
 function showHistory(sourceId) {
-  const config = getConfig();
-  const spreadSheet = SpreadsheetApp.openById(config.SPREADSHEET_ID);
-  const sheet = spreadSheet.getSheetByName(config.SHEET_NAME);
-
-  // シートの全データを取得
-  const allData = sheet.getDataRange().getValues();
-
-  let totalAmount = 0; // 支払総額
-  const historyList = []; // 履歴メッセージの配列
-
-  // 1行目（ヘッダー）を飛ばして2行目からチェック
-  for (let i = 1; i < allData.length; i++) {
-    const row = allData[i];
-    const rowSourceId = row[1]; // B列: グループID
-    const payer = row[3]; // D列: 支払った人
-    const amount = row[4]; // E列: 金額
-    const content = row[5] || "内容なし"; // F列: 内容（なければデフォルト）
-    const status = row[6]; // G列: ステータス
-
-    // 「グループIDが一致」かつ「ステータスが "記録済"」の行だけ
-    if (rowSourceId === sourceId && status === "記録済") {
-      // データが正常か（金額が数値か）チェック
-      if (typeof amount === "number" && !isNaN(amount)) {
-        totalAmount += amount;
-        historyList.push(`・ ${payer}: ${amount}円 (${content})`);
-      }
-    }
-  }
-
-  // ----------------
-  // 履歴があるかチェック
-  // ----------------
-  if (historyList.length === 0) {
-    return "まだ「記録済」のデータは1件もないみたいだよ。";
-  }
-
-  // ----------------
-  // 返信メッセージを作成
-  // ----------------
-  let replyMessage = `【未精算の履歴】\n\n`;
-  replyMessage += historyList.join("\n"); // 履歴を改行で連結
-  replyMessage += `\n\n----------------\n合計: ${totalAmount}円`;
-
-  return replyMessage;
+  return formatHistoryText(getHistoryData(sourceId));
 }
 
 // ★★★ ここから下が「"記録済"の」メンバー一覧を表示する関数 ★★★
@@ -663,91 +840,51 @@ function showMembers(sourceId) {
 // ---------------------------------------------------------------------------------
 // ★★★ ここから下が新しく追加した「ヘルプ」専用の関数 ★★★
 // ---------------------------------------------------------------------------------
-function getHelpMessage() {
-  let message = `【割り勘Botの使い方】\n\n`; // タイトル
-
-  message += `◆ 支払い記録\n`;
-  message += `@（支払った人）\n`;
-  message += `（金額）\n`;
-  message += `（内容）※任意\n\n`;
-
-  message += `◆ 精算（参加者全員で）\n`;
-  message += `精算\n`;
-  message += `（参加者A）\n`;
-  message += `（参加者B）\n`;
-  message += `...\n\n`;
-
-  message += `◆ 未精算の履歴\n`;
-  message += `履歴\n\n`;
-
-  message += `◆ 記録メンバーの確認\n`;
-  message += `メンバー\n\n`;
-
-  message += `◆ 直前の記録を消す\n`;
-  message += `取消 or 取り消し\n\n`;
-
-  message += `◆ 全記録をリセット\n`;
-  message += `リセット`;
-
-  return message;
+// 名前を正規化（全角英数→半角、全角スペース→半角、カタカナ→ひらがな、trim）
+function normalizeName(s) {
+  if (!s) return "";
+  let r = s.replace(/[Ａ-Ｚａ-ｚ０-９]/g, function (c) {
+    return String.fromCharCode(c.charCodeAt(0) - 0xFEE0);
+  });
+  r = r.replace(/　/g, " ").trim();
+  r = r.replace(/[ァ-ヶ]/g, function (c) {
+    return String.fromCharCode(c.charCodeAt(0) - 0x60);
+  });
+  return r;
 }
 
-// ＃コマンドで限定割り勘を登録する関数
-function registerLimitedPayment(receivedText, sourceId, senderId, config) {
-  const parts = receivedText.split("\n");
-  parts[0] = parts[0].substring(1).trim(); // 「#」を取り除く
-
-  // ★「限定」は最低4行（支払者、金額、内容、対象者1）が必要
-  if (parts.length < 4) {
-    return "ごめん、限定割り勘のフォーマットが違うみたい。\n\n＃（支払った人）\n（金額）\n（内容）\n（対象者A）\n（対象者B）...\n\nのように、対象者を「4行目以降」に指定してね！";
+// 既存の払った人の中で、正規化したら一致するけど元の表記が違う名前があれば返す
+// 例: "タロウ" を新規入力したとき履歴に "たろう" があれば "たろう" を返す
+function findSimilarPayer(newName, sourceId) {
+  const normalized = normalizeName(newName);
+  if (!normalized) return null;
+  const payers = getKnownPayers(sourceId);
+  for (let i = 0; i < payers.length; i++) {
+    const existing = payers[i];
+    if (existing === newName) return null; // 完全一致は警告不要
+    if (normalizeName(existing) === normalized) return existing;
   }
-
-  const payer = parts[0];
-  const amountString = parts[1].trim();
-  let hankakuAmountString = zenkakuToHankaku(amountString); //
-  hankakuAmountString = hankakuAmountString.replace(/[^0-9]/g, "");
-
-  // ★対象者リスト（4行目以降）を取得
-  const targetMembers = [];
-  for (let i = 3; i < parts.length; i++) {
-    const name = parts[i].trim();
-    if (name) { // 空白行は無視
-      targetMembers.push(name);
-    }
-  }
-
-  // 必須項目（支払者、金額、対象者1人以上）のチェック
-  if (payer && hankakuAmountString && !isNaN(hankakuAmountString) && targetMembers.length > 0) {
-    const spreadSheet = SpreadsheetApp.openById(config.SPREADSHEET_ID);
-    const sheet = spreadSheet.getSheetByName(config.SHEET_NAME);
-    const amount = Number(hankakuAmountString);
-    const content = parts[2].trim() || "（内容なし）"; // 3行目が空でもOK
-    const status = "記録済";
-    
-    // ★H列（8列目）に「カンマ区切り」の文字列で保存
-    const limitedMembersString = targetMembers.join(","); 
-
-    sheet.appendRow([
-      new Date(),
-      sourceId,
-      senderId,
-      payer,
-      amount,
-      content,
-      status,
-      limitedMembersString // ★H列に保存！
-    ]);
-
-    let replyText = `【限定記録しました！】\n支払った人： ${payer}\n金額： ${amount}円`;
-    if (content !== "（内容なし）") {
-      replyText += `\n内容： ${content}`;
-    }
-    replyText += `\n\n★対象者 ( ${targetMembers.length}名 )\n${targetMembers.join(", ")}`;
-    
-    return replyText;
-
-  } else {
-    // 項目が足りない場合
-    return "ごめん、フォーマットが違うか、対象者が指定されてないみたい。\n\n＃（支払った人）\n（金額）\n（内容）\n（対象者A）\n...\n\n金額は「数字」、対象者は「1人以上」指定してね！";
-  }
+  return null;
 }
+
+// 未精算の履歴に出てくる「払った人」のユニーク一覧を返す
+function getKnownPayers(sourceId) {
+  const config = getConfig();
+  const sheet = SpreadsheetApp.openById(config.SPREADSHEET_ID).getSheetByName(config.SHEET_NAME);
+  const data = sheet.getDataRange().getValues();
+  const set = new Set();
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    if (row[1] === sourceId && row[6] === "記録済" && row[3]) {
+      set.add(row[3]);
+    }
+  }
+  return Array.from(set);
+}
+
+// メインのメニュー文言（ヘルプとBotメンションで共通）
+const MENU_TEXT =
+  "【割り勘Botのメニュー】\n" +
+  "何をする？下のボタンから選んでね。\n\n" +
+  "（記録は @（払った人）で送ってね）";
+const MENU_LABELS = ["記録の仕方", "履歴", "精算", "メンバー", "取消"];

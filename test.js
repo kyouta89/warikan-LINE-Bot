@@ -38,12 +38,12 @@ function __test_seed_at_records() {
   Logger.log('[seed @] 3 rows added');
 }
 
-// ＃コマンド相当: 限定割り勘を登録ロジック経由で追加
+// 限定割り勘相当: 4行目以降に対象者を書いて登録（@ 統合済みの新フォーマット）
 function __test_seed_limited() {
   const config = getConfig();
-  const text = '#Carol\n6000\nKaraoke\nAlice\nCarol';
-  const reply = registerLimitedPayment(text, TEST_SOURCE_ID, TEST_SENDER_ID, config);
-  Logger.log('[seed #] ' + reply);
+  const text = '@Carol\n6000\nKaraoke\nAlice\nCarol';
+  const result = registerPayment(text, TEST_SOURCE_ID, TEST_SENDER_ID, config);
+  Logger.log('[seed limited] ' + result.replyText);
 }
 
 function __test_history() {
@@ -102,33 +102,65 @@ function __test_handleEvent_dispatch() {
 
   Logger.log("--- handleEvent dispatch tests ---");
 
-  check("ヘルプ", function () {
+  check("ヘルプ → メニュー化された返信", function () {
     r = handleEvent(__mkEvent("ヘルプ"), config);
     __assert(r.shouldReply === true, "should reply");
-    __assertEq(r.quickReplyLabels, ["履歴", "メンバー"], "labels");
-    __assert(r.replyText.indexOf("【割り勘Botの使い方】") === 0, "help text");
+    __assertEq(r.quickReplyLabels, ["記録の仕方", "履歴", "精算", "メンバー", "取消"], "menu labels");
+    __assert(r.replyText.indexOf("【割り勘Botのメニュー】") === 0, "menu text");
   });
 
   check("使い方（ヘルプの別名）", function () {
     r = handleEvent(__mkEvent("使い方"), config);
-    __assert(r.replyText.indexOf("【割り勘Botの使い方】") === 0, "alias works");
+    __assert(r.replyText.indexOf("【割り勘Botのメニュー】") === 0, "alias works");
   });
 
-  check("履歴", function () {
+  check("履歴 → テキスト + Flex", function () {
     r = handleEvent(__mkEvent("履歴"), config);
     __assertEq(r.quickReplyLabels, ["メンバー", "ヘルプ"], "labels");
-    __assert(r.replyText.indexOf("【未精算の履歴】") === 0, "history text");
+    __assert(r.replyText.indexOf("【未精算の履歴】") === 0, "altText");
+    __assert(r.flexMessage && r.flexMessage.type === "flex", "flex present");
+    __assert(r.flexMessage.contents.header.backgroundColor === "#06C755", "green header");
+  });
+
+  check("履歴（記録なし時）", function () {
+    __test_cleanup();
+    r = handleEvent(__mkEvent("履歴"), config);
+    __assert(r.replyText.indexOf("まだ「記録済」") === 0, "empty message");
+    __assertEq(r.quickReplyLabels, ["記録の仕方"], "guide labels");
+    __assert(!r.flexMessage, "no flex when empty");
+    __test_seed_at_records();
+  });
+
+  check("getHistoryData の構造化データ", function () {
+    const d = getHistoryData(TEST_SOURCE_ID);
+    __assertEq(d.records.length, 3, "3 records");
+    __assertEq(d.totalAmount, 9000, "total");
+    __assertEq(d.omittedCount, 0, "no omission");
+  });
+
+  check("過去の履歴（隠しコマンド）— 精算済データを返す", function () {
+    // 一度精算してデータを 精算済 に
+    handleEvent(__mkEvent("精算\nAlice\nBob"), config);
+    r = handleEvent(__mkEvent("過去の履歴"), config);
+    __assert(r.shouldReply === true, "should reply");
+    __assert(r.replyText.indexOf("【過去の履歴 (精算済)】") === 0, "title");
+    __assert(r.flexMessage && r.flexMessage.contents.header.contents[0].text.indexOf("📜") === 0, "past header");
+    __assert(r.flexMessage.contents.header.backgroundColor === "#6c757d", "grey header for past");
+    __assertEq(r.quickReplyLabels, ["履歴"], "labels");
+    __test_cleanup();
+    __test_seed_at_records();
+  });
+
+  check("過去の履歴（精算済なし時）", function () {
+    __test_cleanup();
+    __test_seed_at_records();
+    r = handleEvent(__mkEvent("過去の履歴"), config);
+    __assert(r.replyText.indexOf("過去に精算した記録はまだない") === 0, "empty message");
   });
 
   check("メンバー", function () {
     r = handleEvent(__mkEvent("メンバー"), config);
     __assertEq(r.quickReplyLabels, ["履歴", "ヘルプ"], "labels");
-  });
-
-  check("精算（参加者なし＝フォーマットエラー）", function () {
-    r = handleEvent(__mkEvent("精算"), config);
-    __assertEq(r.quickReplyLabels, ["メンバー", "ヘルプ"], "error labels");
-    __assert(r.replyText.indexOf("「精算」コマンドの使い方") === 0, "error text");
   });
 
   check("精算（成功パス）", function () {
@@ -203,12 +235,13 @@ function __test_handleEvent_dispatch() {
     __assert(r.replyText.indexOf("【一部の人だけで割る場合の記録方法】") === 0, "guide text");
   });
 
-  check("Bot メンション → 案内を返す", function () {
+  check("Bot メンション → メニュー（ヘルプと同じ）", function () {
     r = handleEvent(__mkEvent("@Bot こんにちは", {
       mention: { mentionees: [{ index: 0, length: 4, isSelf: true }] }
     }), config);
     __assert(r.shouldReply === true, "should reply");
-    __assertEq(r.quickReplyLabels, ["記録の仕方", "履歴", "メンバー", "ヘルプ"], "labels");
+    __assertEq(r.quickReplyLabels, ["記録の仕方", "履歴", "精算", "メンバー", "取消"], "menu labels");
+    __assert(r.replyText.indexOf("【割り勘Botのメニュー】") === 0, "menu text");
   });
 
   check("他メンバーへのメンション → 無視", function () {
@@ -227,12 +260,13 @@ function __test_handleEvent_dispatch() {
   check("@ 記録 フォーマットエラー（行数不足）", function () {
     r = handleEvent(__mkEvent("@TestPayer"), config);
     __assert(r.replyText.indexOf("ごめん") === 0, "error");
-    __assertEq(r.quickReplyLabels, ["ヘルプ"], "labels");
+    __assertEq(r.quickReplyLabels, ["記録の仕方"], "labels point to guide");
   });
 
   check("@ 記録 金額が文字列", function () {
     r = handleEvent(__mkEvent("@TestPayer\nabc\nメモ"), config);
     __assert(r.replyText.indexOf("ごめん") === 0, "error");
+    __assertEq(r.quickReplyLabels, ["記録の仕方"], "labels point to guide");
   });
 
   check("@ 全角金額の正規化", function () {
@@ -240,16 +274,17 @@ function __test_handleEvent_dispatch() {
     __assert(r.replyText.indexOf("3000円") >= 0, "zenkaku → hankaku");
   });
 
-  check("＃ 限定記録（成功）", function () {
-    r = handleEvent(__mkEvent("＃TestPayer\n500\n限定\nAlice\nBob"), config);
-    __assert(r.replyText.indexOf("【限定記録しました！】") === 0, "success");
+  check("@ 4行以上で限定割り勘になる（新統合フォーマット）", function () {
+    r = handleEvent(__mkEvent("@TestPayer\n500\n限定\nAlice\nBob"), config);
+    __assert(r.replyText.indexOf("【記録しました！】") === 0, "success");
+    __assert(r.replyText.indexOf("★対象者") >= 0, "targets shown");
     __assertEq(r.quickReplyLabels, ["履歴", "取消"], "labels");
   });
 
-  check("＃ 限定記録 対象者なし → エラー", function () {
-    r = handleEvent(__mkEvent("＃TestPayer\n500\n内容"), config);
-    __assert(r.replyText.indexOf("ごめん") === 0, "error");
-    __assertEq(r.quickReplyLabels, ["ヘルプ"], "labels");
+  check("＃ は @ のエイリアス（後方互換）", function () {
+    r = handleEvent(__mkEvent("＃TestPayer\n500\n限定\nAlice\nBob"), config);
+    __assert(r.replyText.indexOf("【記録しました！】") === 0, "alias works");
+    __assert(r.replyText.indexOf("★対象者") >= 0, "targets recognized");
   });
 
   check("不明なコマンド → 無視", function () {
@@ -257,11 +292,135 @@ function __test_handleEvent_dispatch() {
     __assert(r.shouldReply === false, "ignored");
   });
 
+  check("「精算しよう」等の会話に誤反応しない", function () {
+    r = handleEvent(__mkEvent("精算しよう"), config);
+    __assert(r.shouldReply === false, "should be ignored");
+    r = handleEvent(__mkEvent("精算するよ"), config);
+    __assert(r.shouldReply === false, "ignored");
+    r = handleEvent(__mkEvent("清算しないと"), config);
+    __assert(r.shouldReply === false, "清算 variant ignored");
+  });
+
+  check("「精算」単体は履歴メンバーで自動提案", function () {
+    r = handleEvent(__mkEvent("精算"), config);
+    __assert(r.shouldReply === true, "should reply");
+    __assert(r.replyText.indexOf("未精算の履歴") === 0, "auto proposal");
+    __assertEq(r.quickReplyLabels, ["このメンバーで精算", "メンバーを追加して精算"], "labels");
+  });
+
+  check("「このメンバーで精算」で実行される", function () {
+    r = handleEvent(__mkEvent("このメンバーで精算"), config);
+    __assert(r.shouldReply === true, "should reply");
+    __assert(r.replyText.indexOf("【精算結果】") === 0, "executes settlement");
+    __assert(r.flexMessage && r.flexMessage.type === "flex", "flex returned");
+    // 後始末
+    __test_cleanup();
+    __test_seed_at_records();
+  });
+
+  check("「メンバーを追加して精算」で手動フォーマット案内", function () {
+    r = handleEvent(__mkEvent("メンバーを追加して精算"), config);
+    __assert(r.shouldReply === true, "should reply");
+    __assert(r.replyText.indexOf("0円参加者") === 0, "manual guide");
+  });
+
+  check("精算する記録がない場合、「精算」単体は記録への案内を返す", function () {
+    __test_cleanup();
+    r = handleEvent(__mkEvent("精算"), config);
+    __assert(r.replyText.indexOf("まだ精算する記録がない") === 0, "no record guidance");
+    __assertEq(r.quickReplyLabels, ["記録の仕方", "履歴"], "labels");
+    __test_seed_at_records();  // 後続テストのために再 seed
+  });
+
   check("テキスト以外（スタンプ等） → 無視", function () {
     const stickerEvent = __mkEvent("dummy");
     stickerEvent.message.type = "sticker";
     r = handleEvent(stickerEvent, config);
     __assert(r.shouldReply === false, "ignored");
+  });
+
+  check("取消（一覧表示）", function () {
+    r = handleEvent(__mkEvent("取消"), config);
+    __assert(r.shouldReply === true, "should reply");
+    __assert(r.replyText.indexOf("最近の記録") === 0, "shows list");
+    __assert(r.replyText.indexOf("Alice") >= 0 || r.replyText.indexOf("Bob") >= 0, "includes records");
+    __assert(r.quickReplyLabels.indexOf("取消1") === 0, "first button is 取消1");
+    __assert(r.quickReplyLabels.indexOf("キャンセル") >= 0, "has cancel button");
+  });
+
+  check("取消N（指定の記録を取消）", function () {
+    // seed: Alice 3000, Bob 1500, Alice 4500 (3rd is most recent)
+    r = handleEvent(__mkEvent("取消1"), config);
+    __assert(r.replyText.indexOf("取消したよ") === 0, "executes");
+    __assert(r.replyText.indexOf("Alice") >= 0, "names latest record");
+    // 後始末
+    __test_cleanup();
+    __test_seed_at_records();
+  });
+
+  check("取消（記録なし時）", function () {
+    __test_cleanup();
+    r = handleEvent(__mkEvent("取消"), config);
+    __assert(r.replyText.indexOf("取消できる記録がない") === 0, "no records message");
+    __assertEq(r.quickReplyLabels, ["記録の仕方", "履歴"], "guide labels");
+    __test_seed_at_records();
+  });
+
+  check("キャンセルコマンド", function () {
+    r = handleEvent(__mkEvent("キャンセル"), config);
+    __assert(r.replyText.indexOf("OK") === 0, "ack");
+    __assertEq(r.quickReplyLabels, ["履歴"], "labels");
+  });
+
+  check("normalizeName: 全角英数→半角、カナ→ひら、空白trim", function () {
+    __assertEq(normalizeName("タロウ"), "たろう", "kata→hira");
+    __assertEq(normalizeName("Ｔａｒｏ"), "Taro", "fullwidth→halfwidth");
+    __assertEq(normalizeName("　たろう　"), "たろう", "trim and zenkaku space");
+    __assertEq(normalizeName("たろう"), "たろう", "passthrough");
+  });
+
+  check("findSimilarPayer: カタ違いを検知", function () {
+    // seed には Alice, Bob があるので、それと衝突しない名前で検証
+    // まず履歴に "たろう" を入れる
+    handleEvent(__mkEvent("@たろう\n100"), config);
+    // "タロウ" を新規追加すると "たろう" が類似として返る想定
+    __assertEq(findSimilarPayer("タロウ", TEST_SOURCE_ID), "たろう", "kata variant detected");
+    // 完全一致はnull
+    __assertEq(findSimilarPayer("たろう", TEST_SOURCE_ID), null, "exact match → no warning");
+    // 別人はnull
+    __assertEq(findSimilarPayer("はなこ", TEST_SOURCE_ID), null, "different name → no warning");
+    // 短い別名（旅行で簡略化）も誤検知しない
+    __assertEq(findSimilarPayer("たろき", TEST_SOURCE_ID), null, "1-char-different name not flagged");
+    __test_cleanup();
+    __test_seed_at_records();
+  });
+
+  check("@ 記録時に類似名があれば警告を返信に追記", function () {
+    handleEvent(__mkEvent("@たろう\n100"), config);  // 既存
+    r = handleEvent(__mkEvent("@タロウ\n200"), config);  // タイポっぽい新規
+    __assert(r.replyText.indexOf("【記録しました！】") === 0, "still records");
+    __assert(r.replyText.indexOf("もしかして「たろう」") >= 0, "warning appended");
+    __test_cleanup();
+    __test_seed_at_records();
+  });
+
+  check("@ 記録時に類似名がなければ警告なし", function () {
+    r = handleEvent(__mkEvent("@TestPayer123\n100"), config);
+    __assert(r.replyText.indexOf("もしかして") === -1, "no warning");
+    __test_cleanup();
+    __test_seed_at_records();
+  });
+
+  check("join イベント → ウェルカム + メニュー", function () {
+    const joinEvent = {
+      type: "join",
+      replyToken: "DUMMY",
+      source: { type: "group", groupId: TEST_SOURCE_ID },
+    };
+    r = handleEvent(joinEvent, config);
+    __assert(r.shouldReply === true, "should reply");
+    __assert(r.replyText.indexOf("こんにちは") === 0, "welcome message");
+    __assertEq(r.quickReplyLabels, ["記録の仕方", "履歴", "精算", "メンバー", "取消"], "menu labels");
   });
 
   __test_cleanup();
