@@ -301,6 +301,18 @@ function __test_handleEvent_dispatch() {
     __assert(r.shouldReply === false, "ignored");
   });
 
+  check("join イベント → ウェルカム + メニュー", function () {
+    const joinEvent = {
+      type: "join",
+      replyToken: "DUMMY",
+      source: { type: "group", groupId: TEST_SOURCE_ID },
+    };
+    r = handleEvent(joinEvent, config);
+    __assert(r.shouldReply === true, "should reply");
+    __assert(r.replyText.indexOf("こんにちは") === 0, "welcome message");
+    __assertEq(r.quickReplyLabels, ["記録の仕方", "履歴", "精算", "メンバー", "取消"], "menu labels");
+  });
+
   __test_cleanup();
   Logger.log("--- result: " + pass + " passed / " + fail + " failed ---");
 }

@@ -60,7 +60,21 @@ function sendReply(replyToken, result) {
 // LINE API は呼ばないのでテストしやすい。スプレッドシートI/Oは内側の関数に閉じている。
 function handleEvent(event, config) {
   const empty = { shouldReply: false, replyText: "", quickReplyLabels: [] };
-  if (!event || event.type !== "message" || !event.message || event.message.type !== "text") {
+  if (!event) return empty;
+
+  // Bot がグループ/トークに招待された瞬間にウェルカム + メニューを送る
+  if (event.type === "join") {
+    return {
+      shouldReply: true,
+      replyText:
+        "こんにちは！割り勘Botです 🧳\n\n" +
+        "このグループでの支払いを記録して、最後に精算できるよ。\n" +
+        "下のボタンから始めよう！",
+      quickReplyLabels: MENU_LABELS,
+    };
+  }
+
+  if (event.type !== "message" || !event.message || event.message.type !== "text") {
     return empty;
   }
 
