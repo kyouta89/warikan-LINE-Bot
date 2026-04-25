@@ -174,6 +174,31 @@ function handleEvent(event, config) {
     };
   }
 
+  // 隠しコマンド: 精算済の過去記録を見る（メニューには出さず、知ってる人だけが叩ける）
+  if (receivedText === "過去の履歴") {
+    const pastData = getHistoryData(sourceId, { status: "精算済" });
+    if (pastData.records.length === 0) {
+      return {
+        shouldReply: true,
+        replyText: "過去に精算した記録はまだないみたいだよ。",
+        quickReplyLabels: ["履歴"],
+      };
+    }
+    const opts = {
+      title: "【過去の履歴 (精算済)】",
+      headerText: "📜 過去の履歴 (" + pastData.totalCount + "件)",
+      altTextPrefix: "【過去の履歴】",
+      headerBg: "#6c757d",   // muted grey: アーカイブ感
+      totalColor: "#6c757d",
+    };
+    return {
+      shouldReply: true,
+      replyText: formatHistoryText(pastData, opts),
+      flexMessage: buildHistoryFlex(pastData, opts),
+      quickReplyLabels: ["履歴"],
+    };
+  }
+
   if (receivedText === "取消" || receivedText === "取り消し") {
     const records = getRecentRecords(sourceId, 5);
     if (records.length === 0) {
@@ -632,9 +657,11 @@ function cancelRecordByRow(rowNumber) {
   sheet.getRange(rowNumber, 7).setValue("取消済");
 }
 
-// 履歴の構造化データを取得（最新10件まで + 合計 + 全体件数）
-function getHistoryData(sourceId, limit) {
-  if (typeof limit !== "number") limit = 10;
+// 履歴の構造化データを取得。options.status で対象ステータスを切替（既定: "記録済"）。
+function getHistoryData(sourceId, options) {
+  options = options || {};
+  const status = options.status || "記録済";
+  const limit = typeof options.limit === "number" ? options.limit : 10;
   const config = getConfig();
   const sheet = SpreadsheetApp.openById(config.SPREADSHEET_ID).getSheetByName(config.SHEET_NAME);
   const allData = sheet.getDataRange().getValues();
@@ -643,7 +670,7 @@ function getHistoryData(sourceId, limit) {
   let totalAmount = 0;
   for (let i = 1; i < allData.length; i++) {
     const row = allData[i];
-    if (row[1] === sourceId && row[6] === "記録済" && typeof row[4] === "number" && !isNaN(row[4])) {
+    if (row[1] === sourceId && row[6] === status && typeof row[4] === "number" && !isNaN(row[4])) {
       all.push({
         payer: row[3],
         amount: row[4],
@@ -662,11 +689,13 @@ function getHistoryData(sourceId, limit) {
   };
 }
 
-function formatHistoryText(data) {
+function formatHistoryText(data, opts) {
+  opts = opts || {};
+  const title = opts.title || "【未精算の履歴】";
   if (data.records.length === 0) {
-    return "まだ「記録済」のデータは1件もないみたいだよ。";
+    return opts.emptyMsg || "まだ「記録済」のデータは1件もないみたいだよ。";
   }
-  let m = "【未精算の履歴】\n\n";
+  let m = title + "\n\n";
   if (data.omittedCount > 0) {
     m += "（前の" + data.omittedCount + "件を省略 / 最新" + data.records.length + "件）\n\n";
   }
@@ -680,7 +709,12 @@ function formatHistoryText(data) {
   return m;
 }
 
-function buildHistoryFlex(data) {
+function buildHistoryFlex(data, opts) {
+  opts = opts || {};
+  const headerText = opts.headerText || ("📒 未精算の履歴 (" + data.totalCount + "件)");
+  const altTextPrefix = opts.altTextPrefix || "【未精算の履歴】";
+  const headerBg = opts.headerBg || "#06C755";
+  const totalColor = opts.totalColor || "#06C755";
   function fmtYen(n) { return n.toLocaleString() + " 円"; }
 
   const rowItems = data.records.map(function (r) {
@@ -726,20 +760,20 @@ function buildHistoryFlex(data) {
     type: "box", layout: "horizontal", margin: "md",
     contents: [
       { type: "text", text: "合計", size: "sm", color: "#888888", flex: 4 },
-      { type: "text", text: fmtYen(data.totalAmount), size: "md", weight: "bold", align: "end", flex: 6, color: "#06C755" },
+      { type: "text", text: fmtYen(data.totalAmount), size: "md", weight: "bold", align: "end", flex: 6, color: totalColor },
     ],
   });
 
   return {
     type: "flex",
-    altText: "【未精算の履歴】" + data.records.length + "件 / 合計 " + fmtYen(data.totalAmount),
+    altText: altTextPrefix + data.records.length + "件 / 合計 " + fmtYen(data.totalAmount),
     contents: {
       type: "bubble",
       header: {
         type: "box", layout: "vertical",
-        backgroundColor: "#06C755", paddingAll: "16px",
+        backgroundColor: headerBg, paddingAll: "16px",
         contents: [
-          { type: "text", text: "📒 未精算の履歴 (" + data.totalCount + "件)", color: "#FFFFFF", weight: "bold", size: "lg" },
+          { type: "text", text: headerText, color: "#FFFFFF", weight: "bold", size: "lg" },
         ],
       },
       body: {

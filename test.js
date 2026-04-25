@@ -138,6 +138,26 @@ function __test_handleEvent_dispatch() {
     __assertEq(d.omittedCount, 0, "no omission");
   });
 
+  check("過去の履歴（隠しコマンド）— 精算済データを返す", function () {
+    // 一度精算してデータを 精算済 に
+    handleEvent(__mkEvent("精算\nAlice\nBob"), config);
+    r = handleEvent(__mkEvent("過去の履歴"), config);
+    __assert(r.shouldReply === true, "should reply");
+    __assert(r.replyText.indexOf("【過去の履歴 (精算済)】") === 0, "title");
+    __assert(r.flexMessage && r.flexMessage.contents.header.contents[0].text.indexOf("📜") === 0, "past header");
+    __assert(r.flexMessage.contents.header.backgroundColor === "#6c757d", "grey header for past");
+    __assertEq(r.quickReplyLabels, ["履歴"], "labels");
+    __test_cleanup();
+    __test_seed_at_records();
+  });
+
+  check("過去の履歴（精算済なし時）", function () {
+    __test_cleanup();
+    __test_seed_at_records();
+    r = handleEvent(__mkEvent("過去の履歴"), config);
+    __assert(r.replyText.indexOf("過去に精算した記録はまだない") === 0, "empty message");
+  });
+
   check("メンバー", function () {
     r = handleEvent(__mkEvent("メンバー"), config);
     __assertEq(r.quickReplyLabels, ["履歴", "ヘルプ"], "labels");
