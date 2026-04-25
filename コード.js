@@ -18,157 +18,204 @@ function getConfig() {
 // LINEの返信APIのURL
 const REPLY_URL = "https://api.line.me/v2/bot/message/reply";
 
-// LINEからメッセージが来た時に実行される関数
+// Quick Reply ボタンを組み立てる（ラベル文字列＝送信される文字列）
+function buildQuickReply(labels) {
+  if (!labels || labels.length === 0) return null;
+  return {
+    items: labels.map(function (label) {
+      return {
+        type: "action",
+        action: { type: "message", label: label, text: label },
+      };
+    }),
+  };
+}
+
+// LINE 返信（quickReply 任意）
+function sendReply(replyToken, text, quickReplyLabels) {
+  const config = getConfig();
+  const message = { type: "text", text: text };
+  const qr = buildQuickReply(quickReplyLabels);
+  if (qr) message.quickReply = qr;
+  UrlFetchApp.fetch(REPLY_URL, {
+    headers: {
+      "Content-Type": "application/json; charset=UTF-8",
+      Authorization: "Bearer " + config.CHANNEL_ACCESS_TOKEN,
+    },
+    method: "post",
+    payload: JSON.stringify({
+      replyToken: replyToken,
+      messages: [message],
+    }),
+  });
+}
+
+// LINEイベント → 返信内容（{shouldReply, replyText, quickReplyLabels}）を返す純粋関数。
+// LINE API は呼ばないのでテストしやすい。スプレッドシートI/Oは内側の関数に閉じている。
+function handleEvent(event, config) {
+  const empty = { shouldReply: false, replyText: "", quickReplyLabels: [] };
+  if (!event || event.type !== "message" || !event.message || event.message.type !== "text") {
+    return empty;
+  }
+
+  const receivedText = event.message.text.trim();
+  const sourceId = event.source.groupId || event.source.userId;
+  const senderId = event.source.userId;
+
+  if (receivedText === "ヘルプ" || receivedText === "使い方") {
+    return { shouldReply: true, replyText: getHelpMessage(), quickReplyLabels: ["履歴", "メンバー"] };
+  }
+
+  if (receivedText.startsWith("精算") || receivedText.startsWith("清算")) {
+    if (receivedText.includes("\n")) {
+      const text = calculateSettlement(sourceId, receivedText);
+      const labels = text.indexOf("【精算結果】") === 0 ? ["履歴"] : ["ヘルプ"];
+      return { shouldReply: true, replyText: text, quickReplyLabels: labels };
+    }
+    return {
+      shouldReply: true,
+      replyText: "「精算」コマンドの使い方が違うみたい！\n\n精算\n（参加者A）\n（参加者B）\n（参加者C）\n\nのように、改行して「参加者全員」の名前を送ってね。",
+      quickReplyLabels: ["メンバー", "ヘルプ"],
+    };
+  }
+
+  if (receivedText === "リセット") {
+    return { shouldReply: true, replyText: resetAllRecords(sourceId), quickReplyLabels: [] };
+  }
+
+  if (receivedText === "メンバー") {
+    return { shouldReply: true, replyText: showMembers(sourceId), quickReplyLabels: ["履歴", "ヘルプ"] };
+  }
+
+  if (receivedText === "履歴") {
+    return { shouldReply: true, replyText: showHistory(sourceId), quickReplyLabels: ["メンバー", "ヘルプ"] };
+  }
+
+  if (receivedText === "取消" || receivedText === "取り消し") {
+    return { shouldReply: true, replyText: cancelLastRecord(senderId), quickReplyLabels: ["履歴"] };
+  }
+
+  // 限定割り勘 (＃) — 「@」より先に判定する
+  if (receivedText.startsWith("#") || receivedText.startsWith("＃")) {
+    const text = registerLimitedPayment(receivedText, sourceId, senderId, config);
+    const labels = text.indexOf("【限定記録しました！】") === 0 ? ["履歴", "取消"] : ["ヘルプ"];
+    return { shouldReply: true, replyText: text, quickReplyLabels: labels };
+  }
+
+  if (receivedText === "記録の仕方") {
+    return {
+      shouldReply: true,
+      replyText:
+        "誰が割り勘の対象になる？\n\n" +
+        "・全員で割るなら → [全員で割る]\n" +
+        "・一部の人だけで割るなら → [一部だけで割る]",
+      quickReplyLabels: ["全員で割る", "一部だけで割る"],
+    };
+  }
+
+  if (receivedText === "全員で割る") {
+    return {
+      shouldReply: true,
+      replyText:
+        "【全員で割る場合の記録方法】\n\n" +
+        "下のように送ってね（改行して2〜3行）：\n\n" +
+        "@（支払った人）\n（金額）\n（内容）※任意\n\n" +
+        "▼ 例\n@たろう\n3000\nランチ",
+      quickReplyLabels: ["履歴", "ヘルプ"],
+    };
+  }
+
+  if (receivedText === "一部だけで割る") {
+    return {
+      shouldReply: true,
+      replyText:
+        "【一部の人だけで割る場合の記録方法】\n\n" +
+        "下のように送ってね（4行目以降に対象者を全員列挙）：\n\n" +
+        "＃（支払った人）\n（金額）\n（内容）\n（対象者A）\n（対象者B）\n...\n\n" +
+        "▼ 例\n＃たろう\n6000\nカラオケ\nたろう\nはなこ",
+      quickReplyLabels: ["履歴", "ヘルプ"],
+    };
+  }
+
+  if (event.message.mention && event.message.mention.mentionees && event.message.mention.mentionees.length > 0) {
+    const botMentioned = event.message.mention.mentionees.some(function (m) {
+      return m.isSelf === true;
+    });
+    if (botMentioned) {
+      return {
+        shouldReply: true,
+        replyText: "呼んでくれてありがとう！\n何をしたい？\n下のボタンから選んでね。",
+        quickReplyLabels: ["記録の仕方", "履歴", "メンバー", "ヘルプ"],
+      };
+    }
+    return empty;
+  }
+
+  if (receivedText.startsWith("@") || receivedText.startsWith("＠")) {
+    return registerSimplePayment(receivedText, sourceId, senderId, config);
+  }
+
+  return empty;
+}
+
+// @ コマンドの記録処理（handleEventから切り出し、{replyText, quickReplyLabels, shouldReply}を返す）
+function registerSimplePayment(receivedText, sourceId, senderId, config) {
+  const fmtError2or3 = {
+    shouldReply: true,
+    replyText: "ごめん、フォーマットが違うみたい。\n\n@（支払った人）\n（金額）\n（内容は任意）\n\nの2行か3行で送ってね！",
+    quickReplyLabels: ["ヘルプ"],
+  };
+  const fmtErrorAmount = {
+    shouldReply: true,
+    replyText: "ごめん、フォーマットが違うみたい。\n\n@（支払った人）\n（金額）\n（内容は任意）\n\n金額はちゃんと「数字」で送ってね！",
+    quickReplyLabels: ["ヘルプ"],
+  };
+
+  const parts = receivedText.split("\n");
+  parts[0] = parts[0].substring(1).trim();
+  if (parts.length !== 2 && parts.length !== 3) return fmtError2or3;
+
+  const payer = parts[0];
+  const amountString = parts[1].trim();
+  let hankaku = zenkakuToHankaku(amountString).replace(/[^0-9]/g, "");
+  if (!payer || !hankaku || isNaN(hankaku)) return fmtErrorAmount;
+
+  const spreadSheet = SpreadsheetApp.openById(config.SPREADSHEET_ID);
+  const sheet = spreadSheet.getSheetByName(config.SHEET_NAME);
+  const amount = Number(hankaku);
+  const content = parts.length === 3 ? parts[2].trim() : "";
+  sheet.appendRow([new Date(), sourceId, senderId, payer, amount, content, "記録済", ""]);
+
+  let replyText = `【記録しました！】\n支払った人： ${payer}\n金額： ${amount}円`;
+  if (content) replyText += `\n内容： ${content}`;
+  return { shouldReply: true, replyText: replyText, quickReplyLabels: ["履歴", "取消"] };
+}
+
+// LINEからメッセージが来た時に実行される関数（薄いI/Oラッパー）
 function doPost(e) {
   let replyToken = "";
-  let replyText = "";
-  let shouldReply = true;
+  let result = { shouldReply: false, replyText: "", quickReplyLabels: [] };
 
   try {
-    // 設定値を安全に取得
     const config = getConfig();
     const event = JSON.parse(e.postData.contents).events[0];
     replyToken = event.replyToken;
-
-    if (event.type === "message" && event.message.type === "text") {
-      const receivedText = event.message.text.trim();
-      const sourceId = event.source.groupId || event.source.userId;
-
-      // ----------------------------------------------------
-      // メッセージの内容で処理を分岐する
-      // ----------------------------------------------------
-
-      // ★★★ ここからが新しい「ヘルプ」コマンド（一番最初に判定） ★★★
-      if (receivedText === "ヘルプ" || receivedText === "使い方") {
-        replyText = getHelpMessage(); // ヘルプメッセージ専用の関数を呼び出す
-      } else if (
-        receivedText.startsWith("精算") ||
-        receivedText.startsWith("清算")
-      ) {
-        // ←ここは元のコード
-
-        // メッセージに改行が含まれているか（＝参加者リストがあるか）チェック
-        if (receivedText.includes("\n")) {
-          // リストがある場合のみ、計算関数を呼び出す
-          replyText = calculateSettlement(sourceId, receivedText);
-        } else {
-          // 「精算」単体で送られてきた場合
-          replyText =
-            "「精算」コマンドの使い方が違うみたい！\n\n精算\n（参加者A）\n（参加者B）\n（参加者C）\n\nのように、改行して「参加者全員」の名前を送ってね。";
-        }
-        // ★★★ ここからが新しい「リセット」コマンド ★★★
-      } else if (receivedText === "リセット") {
-        const sourceId = event.source.groupId || event.source.userId; // グループIDを取得
-        replyText = resetAllRecords(sourceId); // 新しいリセット関数を呼び出す
-
-        // ★★★ ここからが新しい「メンバー確認」コマンド ★★★
-      } else if (receivedText === "メンバー") {
-        const sourceId = event.source.groupId || event.source.userId; // グループIDを取得
-        replyText = showMembers(sourceId); // 新しいメンバー関数を呼び出す
-
-        // ★★★ ここからが新しい「履歴」コマンド ★★★
-      } else if (receivedText === "履歴") {
-        const sourceId = event.source.groupId || event.source.userId; // グループIDを取得
-        replyText = showHistory(sourceId); // 新しい履歴関数を呼び出す
-
-        // ★★★ ここからが新しい「取消」コマンド ★★★
-      } else if (receivedText === "取消" || receivedText === "取り消し") {
-        const senderId = event.source.userId; // コマンドを送った本人のID
-        replyText = cancelLastRecord(senderId); // 新しい取消関数を呼び出す
-
-      // ★★★ 【NEW!!】限定割り勘コマンド (＃) ★★★
-      // （「@」より先に判定するのがミソ）
-      } else if (
-        receivedText.startsWith("#") || // 半角
-        receivedText.startsWith("＃")  // 全角
-      ) {
-        // ここに「限定割り勘」の記録ロジックを書く！
-        replyText = registerLimitedPayment(receivedText, sourceId, event.source.userId, config);
-
-        // ★★★ ここからが新しい「メンション無視」の処理 ★★★
-      } else if (event.message.mention && event.message.mention.mentionees.length > 0) {
-        // メンション情報が含まれていたら、コマンドとして扱わずに無視する
-        shouldReply = false; 
-
-      } else if (receivedText.startsWith('@') || receivedText.startsWith('＠')) { // ←ここは元のコード
-        const parts = receivedText.split("\n");
-        parts[0] = parts[0].substring(1).trim();
-        if (parts.length === 2 || parts.length === 3) {
-          const payer = parts[0];
-          const amountString = parts[1].trim();
-          let hankakuAmountString = zenkakuToHankaku(amountString);
-          hankakuAmountString = hankakuAmountString.replace(/[^0-9]/g, "");
-          if (payer && hankakuAmountString && !isNaN(hankakuAmountString)) {
-            const spreadSheet = SpreadsheetApp.openById(config.SPREADSHEET_ID);
-            const sheet = spreadSheet.getSheetByName(config.SHEET_NAME);
-            const amount = Number(hankakuAmountString);
-            const content = parts.length === 3 ? parts[2].trim() : "";
-            const status = "記録済";
-            sheet.appendRow([
-              new Date(),
-              sourceId,
-              event.source.userId,
-              payer,
-              amount,
-              content,
-              status,
-              "",
-            ]);
-            replyText = `【記録しました！】\n支払った人： ${payer}\n金額： ${amount}円`;
-            if (content) {
-              replyText += `\n内容： ${content}`;
-            }
-          } else {
-            replyText =
-              "ごめん、フォーマットが違うみたい。\n\n@（支払った人）\n（金額）\n（内容は任意）\n\n金額はちゃんと「数字」で送ってね！";
-          }
-        } else {
-          replyText =
-            "ごめん、フォーマットが違うみたい。\n\n@（支払った人）\n（金額）\n（内容は任意）\n\nの2行か3行で送ってね！";
-        }
-      } else {
-        shouldReply = false; // コマンド以外は無視
-      }
-    } else {
-      shouldReply = false; // テキスト以外は無視
-    }
+    result = handleEvent(event, config);
   } catch (err) {
-    replyText = "ごめん、エラーが発生しちゃったみたい...";
+    result = {
+      shouldReply: true,
+      replyText: "ごめん、エラーが発生しちゃったみたい...",
+      quickReplyLabels: [],
+    };
     try {
       const config = getConfig();
-      const spreadSheet = SpreadsheetApp.openById(config.SPREADSHEET_ID);
-      const sheet = spreadSheet.getSheetByName(config.SHEET_NAME);
-      // セキュリティ向上：詳細な情報はログに残さない
-      sheet.appendRow([
-        new Date(),
-        "ERROR",
-        err.message, // err.toString()ではなくmessageのみ
-        "Request received", // 詳細なリクエスト内容は記録しない
-      ]);
-    } catch (e) {}
+      const sheet = SpreadsheetApp.openById(config.SPREADSHEET_ID).getSheetByName(config.SHEET_NAME);
+      sheet.appendRow([new Date(), "ERROR", err.message, "Request received"]);
+    } catch (e2) {}
   }
 
-  // ----------------------------------------------------
-  // 返信する処理
-  // ----------------------------------------------------
-  if (replyToken && shouldReply) {
-    const config = getConfig();
-    UrlFetchApp.fetch(REPLY_URL, {
-      headers: {
-        "Content-Type": "application/json; charset=UTF-8",
-        Authorization: "Bearer " + config.CHANNEL_ACCESS_TOKEN,
-      },
-      method: "post",
-      payload: JSON.stringify({
-        replyToken: replyToken,
-        messages: [
-          {
-            type: "text",
-            text: replyText,
-          },
-        ],
-      }),
-    });
+  if (replyToken && result.shouldReply) {
+    sendReply(replyToken, result.replyText, result.quickReplyLabels);
   }
 
   return ContentService.createTextOutput(
