@@ -72,7 +72,10 @@ function handleEvent(event, config) {
     return { shouldReply: true, replyText: getHelpMessage(), quickReplyLabels: ["履歴", "メンバー"] };
   }
 
-  if (receivedText.startsWith("精算") || receivedText.startsWith("清算")) {
+  // 「精算しよう」等の自然な会話で誤発火しないよう、完全一致 or 改行付きのみ受け付ける
+  const isSettleExact = receivedText === "精算" || receivedText === "清算";
+  const isSettleMultiline = receivedText.startsWith("精算\n") || receivedText.startsWith("清算\n");
+  if (isSettleExact || isSettleMultiline) {
     if (receivedText.includes("\n")) {
       const r = computeSettlement(sourceId, receivedText);
       if (r.ok) {
@@ -108,11 +111,10 @@ function handleEvent(event, config) {
     return { shouldReply: true, replyText: cancelLastRecord(senderId), quickReplyLabels: ["履歴"] };
   }
 
-  // 限定割り勘 (＃) — 「@」より先に判定する
+  // 「＃」は「@」のエイリアスとして扱う（後方互換）。プレフィックスを @ に正規化。
   if (receivedText.startsWith("#") || receivedText.startsWith("＃")) {
-    const text = registerLimitedPayment(receivedText, sourceId, senderId, config);
-    const labels = text.indexOf("【限定記録しました！】") === 0 ? ["履歴", "取消"] : ["ヘルプ"];
-    return { shouldReply: true, replyText: text, quickReplyLabels: labels };
+    const normalized = "@" + receivedText.substring(1);
+    return registerPayment(normalized, sourceId, senderId, config);
   }
 
   if (receivedText === "記録の仕方") {
@@ -131,7 +133,6 @@ function handleEvent(event, config) {
       shouldReply: true,
       replyText:
         "【全員で割る場合の記録方法】\n\n" +
-        "下のように送ってね（改行して2〜3行）：\n\n" +
         "@（支払った人）\n（金額）\n（内容）※任意\n\n" +
         "▼ 例\n@たろう\n3000\nランチ",
       quickReplyLabels: ["履歴", "ヘルプ"],
@@ -143,9 +144,9 @@ function handleEvent(event, config) {
       shouldReply: true,
       replyText:
         "【一部の人だけで割る場合の記録方法】\n\n" +
-        "下のように送ってね（4行目以降に対象者を全員列挙）：\n\n" +
-        "＃（支払った人）\n（金額）\n（内容）\n（対象者A）\n（対象者B）\n...\n\n" +
-        "▼ 例\n＃たろう\n6000\nカラオケ\nたろう\nはなこ",
+        "@（支払った人）\n（金額）\n（内容）\n（対象者A）\n（対象者B）\n...\n\n" +
+        "※ 4行目以降に対象者を書くと、その人たちだけで割り勘になります\n\n" +
+        "▼ 例\n@たろう\n6000\nカラオケ\nたろう\nはなこ",
       quickReplyLabels: ["履歴", "ヘルプ"],
     };
   }
@@ -165,42 +166,48 @@ function handleEvent(event, config) {
   }
 
   if (receivedText.startsWith("@") || receivedText.startsWith("＠")) {
-    return registerSimplePayment(receivedText, sourceId, senderId, config);
+    return registerPayment(receivedText, sourceId, senderId, config);
   }
 
   return empty;
 }
 
-// @ コマンドの記録処理（handleEventから切り出し、{replyText, quickReplyLabels, shouldReply}を返す）
-function registerSimplePayment(receivedText, sourceId, senderId, config) {
-  const fmtError2or3 = {
+// @コマンドの記録処理（@ と ＃ の統合版）
+// 1行目: @ + 支払い人, 2行目: 金額, 3行目: 内容（任意）, 4行目以降: 対象者リスト（あれば限定割り勘）
+function registerPayment(receivedText, sourceId, senderId, config) {
+  const fmtError = {
     shouldReply: true,
-    replyText: "ごめん、フォーマットが違うみたい。\n\n@（支払った人）\n（金額）\n（内容は任意）\n\nの2行か3行で送ってね！",
-    quickReplyLabels: ["ヘルプ"],
-  };
-  const fmtErrorAmount = {
-    shouldReply: true,
-    replyText: "ごめん、フォーマットが違うみたい。\n\n@（支払った人）\n（金額）\n（内容は任意）\n\n金額はちゃんと「数字」で送ってね！",
-    quickReplyLabels: ["ヘルプ"],
+    replyText:
+      "ごめん、フォーマットが違うみたい。\n\n" +
+      "@（支払った人）\n（金額）\n（内容）※任意\n（対象者A）\n（対象者B）...\n\n" +
+      "金額は「数字」で送ってね！\n対象を絞らないなら3行までで OK。",
+    quickReplyLabels: ["記録の仕方"],
   };
 
   const parts = receivedText.split("\n");
   parts[0] = parts[0].substring(1).trim();
-  if (parts.length !== 2 && parts.length !== 3) return fmtError2or3;
+  if (parts.length < 2) return fmtError;
 
   const payer = parts[0];
   const amountString = parts[1].trim();
-  let hankaku = zenkakuToHankaku(amountString).replace(/[^0-9]/g, "");
-  if (!payer || !hankaku || isNaN(hankaku)) return fmtErrorAmount;
+  const hankaku = zenkakuToHankaku(amountString).replace(/[^0-9]/g, "");
+  if (!payer || !hankaku || isNaN(hankaku)) return fmtError;
 
-  const spreadSheet = SpreadsheetApp.openById(config.SPREADSHEET_ID);
-  const sheet = spreadSheet.getSheetByName(config.SHEET_NAME);
   const amount = Number(hankaku);
-  const content = parts.length === 3 ? parts[2].trim() : "";
-  sheet.appendRow([new Date(), sourceId, senderId, payer, amount, content, "記録済", ""]);
+  const content = parts.length >= 3 ? parts[2].trim() : "";
+  const targets = parts.length >= 4
+    ? parts.slice(3).map(function (s) { return s.trim(); }).filter(function (s) { return s.length > 0; })
+    : [];
+  const limitedMembersString = targets.length > 0 ? targets.join(",") : "";
+
+  const sheet = SpreadsheetApp.openById(config.SPREADSHEET_ID).getSheetByName(config.SHEET_NAME);
+  sheet.appendRow([new Date(), sourceId, senderId, payer, amount, content, "記録済", limitedMembersString]);
 
   let replyText = `【記録しました！】\n支払った人： ${payer}\n金額： ${amount}円`;
   if (content) replyText += `\n内容： ${content}`;
+  if (targets.length > 0) {
+    replyText += `\n\n★対象者 ( ${targets.length}名 )\n${targets.join(", ")}`;
+  }
   return { shouldReply: true, replyText: replyText, quickReplyLabels: ["履歴", "取消"] };
 }
 
@@ -664,90 +671,14 @@ function showMembers(sourceId) {
 // ★★★ ここから下が新しく追加した「ヘルプ」専用の関数 ★★★
 // ---------------------------------------------------------------------------------
 function getHelpMessage() {
-  let message = `【割り勘Botの使い方】\n\n`; // タイトル
-
-  message += `◆ 支払い記録\n`;
-  message += `@（支払った人）\n`;
-  message += `（金額）\n`;
-  message += `（内容）※任意\n\n`;
-
-  message += `◆ 精算（参加者全員で）\n`;
-  message += `精算\n`;
-  message += `（参加者A）\n`;
-  message += `（参加者B）\n`;
-  message += `...\n\n`;
-
-  message += `◆ 未精算の履歴\n`;
-  message += `履歴\n\n`;
-
-  message += `◆ 記録メンバーの確認\n`;
-  message += `メンバー\n\n`;
-
-  message += `◆ 直前の記録を消す\n`;
-  message += `取消 or 取り消し\n\n`;
-
-  message += `◆ 全記録をリセット\n`;
-  message += `リセット`;
-
-  return message;
-}
-
-// ＃コマンドで限定割り勘を登録する関数
-function registerLimitedPayment(receivedText, sourceId, senderId, config) {
-  const parts = receivedText.split("\n");
-  parts[0] = parts[0].substring(1).trim(); // 「#」を取り除く
-
-  // ★「限定」は最低4行（支払者、金額、内容、対象者1）が必要
-  if (parts.length < 4) {
-    return "ごめん、限定割り勘のフォーマットが違うみたい。\n\n＃（支払った人）\n（金額）\n（内容）\n（対象者A）\n（対象者B）...\n\nのように、対象者を「4行目以降」に指定してね！";
-  }
-
-  const payer = parts[0];
-  const amountString = parts[1].trim();
-  let hankakuAmountString = zenkakuToHankaku(amountString); //
-  hankakuAmountString = hankakuAmountString.replace(/[^0-9]/g, "");
-
-  // ★対象者リスト（4行目以降）を取得
-  const targetMembers = [];
-  for (let i = 3; i < parts.length; i++) {
-    const name = parts[i].trim();
-    if (name) { // 空白行は無視
-      targetMembers.push(name);
-    }
-  }
-
-  // 必須項目（支払者、金額、対象者1人以上）のチェック
-  if (payer && hankakuAmountString && !isNaN(hankakuAmountString) && targetMembers.length > 0) {
-    const spreadSheet = SpreadsheetApp.openById(config.SPREADSHEET_ID);
-    const sheet = spreadSheet.getSheetByName(config.SHEET_NAME);
-    const amount = Number(hankakuAmountString);
-    const content = parts[2].trim() || "（内容なし）"; // 3行目が空でもOK
-    const status = "記録済";
-    
-    // ★H列（8列目）に「カンマ区切り」の文字列で保存
-    const limitedMembersString = targetMembers.join(","); 
-
-    sheet.appendRow([
-      new Date(),
-      sourceId,
-      senderId,
-      payer,
-      amount,
-      content,
-      status,
-      limitedMembersString // ★H列に保存！
-    ]);
-
-    let replyText = `【限定記録しました！】\n支払った人： ${payer}\n金額： ${amount}円`;
-    if (content !== "（内容なし）") {
-      replyText += `\n内容： ${content}`;
-    }
-    replyText += `\n\n★対象者 ( ${targetMembers.length}名 )\n${targetMembers.join(", ")}`;
-    
-    return replyText;
-
-  } else {
-    // 項目が足りない場合
-    return "ごめん、フォーマットが違うか、対象者が指定されてないみたい。\n\n＃（支払った人）\n（金額）\n（内容）\n（対象者A）\n...\n\n金額は「数字」、対象者は「1人以上」指定してね！";
-  }
+  return (
+    "【割り勘Botの使い方】\n\n" +
+    "◆ 支払い記録\n" +
+    "@（支払った人）\n（金額）\n（内容）※任意\n\n" +
+    "→ 対象を絞りたいときは、4行目から対象者を書く\n\n" +
+    "◆ 精算\n" +
+    "精算\n（参加者A）\n（参加者B）\n...\n\n" +
+    "◆ その他\n" +
+    "履歴 / メンバー / 取消 / リセット"
+  );
 }

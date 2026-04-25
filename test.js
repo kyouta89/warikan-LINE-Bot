@@ -38,12 +38,12 @@ function __test_seed_at_records() {
   Logger.log('[seed @] 3 rows added');
 }
 
-// ＃コマンド相当: 限定割り勘を登録ロジック経由で追加
+// 限定割り勘相当: 4行目以降に対象者を書いて登録（@ 統合済みの新フォーマット）
 function __test_seed_limited() {
   const config = getConfig();
-  const text = '#Carol\n6000\nKaraoke\nAlice\nCarol';
-  const reply = registerLimitedPayment(text, TEST_SOURCE_ID, TEST_SENDER_ID, config);
-  Logger.log('[seed #] ' + reply);
+  const text = '@Carol\n6000\nKaraoke\nAlice\nCarol';
+  const result = registerPayment(text, TEST_SOURCE_ID, TEST_SENDER_ID, config);
+  Logger.log('[seed limited] ' + result.replyText);
 }
 
 function __test_history() {
@@ -227,12 +227,13 @@ function __test_handleEvent_dispatch() {
   check("@ 記録 フォーマットエラー（行数不足）", function () {
     r = handleEvent(__mkEvent("@TestPayer"), config);
     __assert(r.replyText.indexOf("ごめん") === 0, "error");
-    __assertEq(r.quickReplyLabels, ["ヘルプ"], "labels");
+    __assertEq(r.quickReplyLabels, ["記録の仕方"], "labels point to guide");
   });
 
   check("@ 記録 金額が文字列", function () {
     r = handleEvent(__mkEvent("@TestPayer\nabc\nメモ"), config);
     __assert(r.replyText.indexOf("ごめん") === 0, "error");
+    __assertEq(r.quickReplyLabels, ["記録の仕方"], "labels point to guide");
   });
 
   check("@ 全角金額の正規化", function () {
@@ -240,21 +241,37 @@ function __test_handleEvent_dispatch() {
     __assert(r.replyText.indexOf("3000円") >= 0, "zenkaku → hankaku");
   });
 
-  check("＃ 限定記録（成功）", function () {
-    r = handleEvent(__mkEvent("＃TestPayer\n500\n限定\nAlice\nBob"), config);
-    __assert(r.replyText.indexOf("【限定記録しました！】") === 0, "success");
+  check("@ 4行以上で限定割り勘になる（新統合フォーマット）", function () {
+    r = handleEvent(__mkEvent("@TestPayer\n500\n限定\nAlice\nBob"), config);
+    __assert(r.replyText.indexOf("【記録しました！】") === 0, "success");
+    __assert(r.replyText.indexOf("★対象者") >= 0, "targets shown");
     __assertEq(r.quickReplyLabels, ["履歴", "取消"], "labels");
   });
 
-  check("＃ 限定記録 対象者なし → エラー", function () {
-    r = handleEvent(__mkEvent("＃TestPayer\n500\n内容"), config);
-    __assert(r.replyText.indexOf("ごめん") === 0, "error");
-    __assertEq(r.quickReplyLabels, ["ヘルプ"], "labels");
+  check("＃ は @ のエイリアス（後方互換）", function () {
+    r = handleEvent(__mkEvent("＃TestPayer\n500\n限定\nAlice\nBob"), config);
+    __assert(r.replyText.indexOf("【記録しました！】") === 0, "alias works");
+    __assert(r.replyText.indexOf("★対象者") >= 0, "targets recognized");
   });
 
   check("不明なコマンド → 無視", function () {
     r = handleEvent(__mkEvent("こんにちは"), config);
     __assert(r.shouldReply === false, "ignored");
+  });
+
+  check("「精算しよう」等の会話に誤反応しない", function () {
+    r = handleEvent(__mkEvent("精算しよう"), config);
+    __assert(r.shouldReply === false, "should be ignored");
+    r = handleEvent(__mkEvent("精算するよ"), config);
+    __assert(r.shouldReply === false, "ignored");
+    r = handleEvent(__mkEvent("清算しないと"), config);
+    __assert(r.shouldReply === false, "清算 variant ignored");
+  });
+
+  check("「精算」単体は引き続きフォーマット案内を返す", function () {
+    r = handleEvent(__mkEvent("精算"), config);
+    __assert(r.shouldReply === true, "still triggers");
+    __assert(r.replyText.indexOf("「精算」コマンドの使い方") === 0, "format guide");
   });
 
   check("テキスト以外（スタンプ等） → 無視", function () {
