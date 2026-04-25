@@ -158,7 +158,20 @@ function handleEvent(event, config) {
   }
 
   if (receivedText === "履歴") {
-    return { shouldReply: true, replyText: showHistory(sourceId), quickReplyLabels: ["メンバー", "ヘルプ"] };
+    const histData = getHistoryData(sourceId);
+    if (histData.records.length === 0) {
+      return {
+        shouldReply: true,
+        replyText: "まだ「記録済」のデータは1件もないみたいだよ。",
+        quickReplyLabels: ["記録の仕方"],
+      };
+    }
+    return {
+      shouldReply: true,
+      replyText: formatHistoryText(histData),
+      flexMessage: buildHistoryFlex(histData),
+      quickReplyLabels: ["メンバー", "ヘルプ"],
+    };
   }
 
   if (receivedText === "取消" || receivedText === "取り消し") {
@@ -619,51 +632,126 @@ function cancelRecordByRow(rowNumber) {
   sheet.getRange(rowNumber, 7).setValue("取消済");
 }
 
-function showHistory(sourceId) {
+// 履歴の構造化データを取得（最新10件まで + 合計 + 全体件数）
+function getHistoryData(sourceId, limit) {
+  if (typeof limit !== "number") limit = 10;
   const config = getConfig();
-  const spreadSheet = SpreadsheetApp.openById(config.SPREADSHEET_ID);
-  const sheet = spreadSheet.getSheetByName(config.SHEET_NAME);
-
-  // シートの全データを取得
+  const sheet = SpreadsheetApp.openById(config.SPREADSHEET_ID).getSheetByName(config.SHEET_NAME);
   const allData = sheet.getDataRange().getValues();
 
-  let totalAmount = 0; // 支払総額
-  const historyList = []; // 履歴メッセージの配列
-
-  // 1行目（ヘッダー）を飛ばして2行目からチェック
+  const all = [];
+  let totalAmount = 0;
   for (let i = 1; i < allData.length; i++) {
     const row = allData[i];
-    const rowSourceId = row[1]; // B列: グループID
-    const payer = row[3]; // D列: 支払った人
-    const amount = row[4]; // E列: 金額
-    const content = row[5] || "内容なし"; // F列: 内容（なければデフォルト）
-    const status = row[6]; // G列: ステータス
-
-    // 「グループIDが一致」かつ「ステータスが "記録済"」の行だけ
-    if (rowSourceId === sourceId && status === "記録済") {
-      // データが正常か（金額が数値か）チェック
-      if (typeof amount === "number" && !isNaN(amount)) {
-        totalAmount += amount;
-        historyList.push(`・ ${payer}: ${amount}円 (${content})`);
-      }
+    if (row[1] === sourceId && row[6] === "記録済" && typeof row[4] === "number" && !isNaN(row[4])) {
+      all.push({
+        payer: row[3],
+        amount: row[4],
+        content: row[5] || "",
+        targets: row[7] || "",
+      });
+      totalAmount += row[4];
     }
   }
+  const records = all.slice(-limit);
+  return {
+    records: records,
+    totalAmount: totalAmount,
+    totalCount: all.length,
+    omittedCount: Math.max(0, all.length - records.length),
+  };
+}
 
-  // ----------------
-  // 履歴があるかチェック
-  // ----------------
-  if (historyList.length === 0) {
+function formatHistoryText(data) {
+  if (data.records.length === 0) {
     return "まだ「記録済」のデータは1件もないみたいだよ。";
   }
+  let m = "【未精算の履歴】\n\n";
+  if (data.omittedCount > 0) {
+    m += "（前の" + data.omittedCount + "件を省略 / 最新" + data.records.length + "件）\n\n";
+  }
+  data.records.forEach(function (r) {
+    let line = "・ " + r.payer + ": " + r.amount + "円";
+    if (r.content) line += " (" + r.content + ")";
+    if (r.targets) line += " [対象: " + r.targets.replace(/,/g, ", ") + "]";
+    m += line + "\n";
+  });
+  m += "\n----------------\n合計: " + data.totalAmount + "円";
+  return m;
+}
 
-  // ----------------
-  // 返信メッセージを作成
-  // ----------------
-  let replyMessage = `【未精算の履歴】\n\n`;
-  replyMessage += historyList.join("\n"); // 履歴を改行で連結
-  replyMessage += `\n\n----------------\n合計: ${totalAmount}円`;
+function buildHistoryFlex(data) {
+  function fmtYen(n) { return n.toLocaleString() + " 円"; }
 
-  return replyMessage;
+  const rowItems = data.records.map(function (r) {
+    const lines = [
+      {
+        type: "box", layout: "horizontal",
+        contents: [
+          { type: "text", text: r.payer, size: "sm", color: "#555555", flex: 5, weight: "bold", wrap: true },
+          { type: "text", text: fmtYen(r.amount), size: "sm", flex: 4, align: "end", color: "#111111" },
+        ],
+      },
+    ];
+    const subParts = [];
+    if (r.content) subParts.push(r.content);
+    if (r.targets) subParts.push("対象: " + r.targets.replace(/,/g, ", "));
+    if (subParts.length > 0) {
+      lines.push({
+        type: "text", text: subParts.join(" / "),
+        size: "xxs", color: "#999999", wrap: true, margin: "xs",
+      });
+    }
+    return {
+      type: "box", layout: "vertical", spacing: "xs",
+      paddingTop: "sm", paddingBottom: "sm",
+      contents: lines,
+    };
+  });
+
+  const bodyContents = [];
+  if (data.omittedCount > 0) {
+    bodyContents.push({
+      type: "text",
+      text: "（前の " + data.omittedCount + " 件を省略 / 最新 " + data.records.length + " 件）",
+      size: "xxs", color: "#aaaaaa", align: "center", margin: "sm",
+    });
+  }
+  rowItems.forEach(function (row, idx) {
+    bodyContents.push(row);
+    if (idx < rowItems.length - 1) bodyContents.push({ type: "separator" });
+  });
+  bodyContents.push({ type: "separator", margin: "md" });
+  bodyContents.push({
+    type: "box", layout: "horizontal", margin: "md",
+    contents: [
+      { type: "text", text: "合計", size: "sm", color: "#888888", flex: 4 },
+      { type: "text", text: fmtYen(data.totalAmount), size: "md", weight: "bold", align: "end", flex: 6, color: "#06C755" },
+    ],
+  });
+
+  return {
+    type: "flex",
+    altText: "【未精算の履歴】" + data.records.length + "件 / 合計 " + fmtYen(data.totalAmount),
+    contents: {
+      type: "bubble",
+      header: {
+        type: "box", layout: "vertical",
+        backgroundColor: "#06C755", paddingAll: "16px",
+        contents: [
+          { type: "text", text: "📒 未精算の履歴 (" + data.totalCount + "件)", color: "#FFFFFF", weight: "bold", size: "lg" },
+        ],
+      },
+      body: {
+        type: "box", layout: "vertical", spacing: "none", contents: bodyContents,
+      },
+    },
+  };
+}
+
+// 後方互換（テキストで返す）
+function showHistory(sourceId) {
+  return formatHistoryText(getHistoryData(sourceId));
 }
 
 // ★★★ ここから下が「"記録済"の」メンバー一覧を表示する関数 ★★★

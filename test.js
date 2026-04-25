@@ -114,10 +114,28 @@ function __test_handleEvent_dispatch() {
     __assert(r.replyText.indexOf("【割り勘Botのメニュー】") === 0, "alias works");
   });
 
-  check("履歴", function () {
+  check("履歴 → テキスト + Flex", function () {
     r = handleEvent(__mkEvent("履歴"), config);
     __assertEq(r.quickReplyLabels, ["メンバー", "ヘルプ"], "labels");
-    __assert(r.replyText.indexOf("【未精算の履歴】") === 0, "history text");
+    __assert(r.replyText.indexOf("【未精算の履歴】") === 0, "altText");
+    __assert(r.flexMessage && r.flexMessage.type === "flex", "flex present");
+    __assert(r.flexMessage.contents.header.backgroundColor === "#06C755", "green header");
+  });
+
+  check("履歴（記録なし時）", function () {
+    __test_cleanup();
+    r = handleEvent(__mkEvent("履歴"), config);
+    __assert(r.replyText.indexOf("まだ「記録済」") === 0, "empty message");
+    __assertEq(r.quickReplyLabels, ["記録の仕方"], "guide labels");
+    __assert(!r.flexMessage, "no flex when empty");
+    __test_seed_at_records();
+  });
+
+  check("getHistoryData の構造化データ", function () {
+    const d = getHistoryData(TEST_SOURCE_ID);
+    __assertEq(d.records.length, 3, "3 records");
+    __assertEq(d.totalAmount, 9000, "total");
+    __assertEq(d.omittedCount, 0, "no omission");
   });
 
   check("メンバー", function () {
